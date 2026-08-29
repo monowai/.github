@@ -1,6 +1,12 @@
 # monowai/.github
 
-Organisation-wide GitHub Actions for the Beancounter repos.
+Organisation-wide GitHub Actions for the Beancounter repos — the things shared
+by several repos, which should not live inside any one of them.
+
+| Workflow | What it does |
+|---|---|
+| [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
+| [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
 
 > This repo is **public** so that `beancounter` (also public) can call the
 > workflows here without any cross-visibility access configuration. Nothing
@@ -8,6 +14,39 @@ Organisation-wide GitHub Actions for the Beancounter repos.
 >
 > There is deliberately no `profile/README.md`; adding one would publish an
 > organisation profile page.
+
+## `build-base-image.yml` — shared JRE base image
+
+Builds and publishes **`ghcr.io/monowai/eclipse-temurin`**, the base image every
+Beancounter service extends.
+
+Source: [`docker/base/Dockerfile`](docker/base/Dockerfile). It is
+`eclipse-temurin:25-jre-alpine` plus the Sentry OpenTelemetry agent and an
+`apk upgrade` — Temurin's published tag lags Alpine security bumps, so the
+upgrade pulls fixed packages rather than waiting for an upstream rebuild. That
+propagates to every service through this one image.
+
+Consumers (unchanged by the move — same image name, same tags):
+
+| Repo | Services |
+|---|---|
+| `beancounter` | svc-data, svc-position, svc-event, svc-admin, svc-agent |
+| `svc-retire` | the service image |
+| `svc-rebalance` | the service image |
+| `bc-deploy` | `Dockerfile.profiler` (older `21-jre-sentry7` tag) |
+
+It previously lived in `beancounter`, which made a cross-repo artifact look
+like one service's private business.
+
+**Triggers:** a push to `main` touching `docker/base/Dockerfile` or the workflow,
+or `workflow_dispatch`. Builds `linux/amd64` and `linux/arm64` on native
+runners, then stitches a multi-arch manifest for both the versioned tag and
+`latest`. The Sentry version in the tag is read out of the Dockerfile, so
+bumping `ENV SENTRY_VERSION=` is the whole release process.
+
+**Requires the `GH_TOKEN` secret** — a PAT with `write:packages`. `GITHUB_TOKEN`
+is not used: the `eclipse-temurin` package predates this repo and is linked to
+`beancounter`, so a repo-scoped token from here is not guaranteed write access.
 
 ## `ocr-review.yml` — AI code review
 

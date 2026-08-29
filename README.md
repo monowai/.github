@@ -44,9 +44,21 @@ runners, then stitches a multi-arch manifest for both the versioned tag and
 `latest`. The Sentry version in the tag is read out of the Dockerfile, so
 bumping `ENV SENTRY_VERSION=` is the whole release process.
 
-**Requires the `GH_TOKEN` secret** — a PAT with `write:packages`. `GITHUB_TOKEN`
-is not used: the `eclipse-temurin` package predates this repo and is linked to
-`beancounter`, so a repo-scoped token from here is not guaranteed write access.
+**No secret required.** It authenticates with the built-in `GITHUB_TOKEN` plus
+`permissions: packages: write` — nothing to store or rotate. (The beancounter
+original used a `GH_TOKEN` PAT despite already granting `packages: write`,
+which looks like habit rather than necessity.)
+
+One-time setup, though: the `eclipse-temurin` package predates this repo and is
+linked to `beancounter`, and an existing package only accepts pushes from repos
+listed in its own access settings. Grant this one write, once:
+
+> `ghcr.io/monowai/eclipse-temurin` → Package settings → **Manage Actions
+> access** → Add repository → `monowai/.github` → **Write**
+
+Without that grant, the login step succeeds and the push fails with `403
+denied` — so a dispatch run is a cheap, safe way to confirm the grant is in
+place.
 
 ## `ocr-review.yml` — AI code review
 

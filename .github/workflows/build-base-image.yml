@@ -8,10 +8,19 @@ name: Build Base Image
 # one service's private business. The image name and tags are unchanged by the
 # move, so no consumer Dockerfile needed touching.
 #
-# Requires the GH_TOKEN secret — a PAT with write:packages. GITHUB_TOKEN is not
-# used here: the eclipse-temurin package predates this repo and is linked to
-# beancounter, so a repo-scoped token from here is not guaranteed write access
-# to it.
+# Authenticates with the built-in GITHUB_TOKEN and the `packages: write`
+# permission below — no PAT to store or rotate. The beancounter original used a
+# GH_TOKEN PAT despite already granting `packages: write`, which looks like
+# habit rather than necessity.
+#
+# One-time setup, because the eclipse-temurin package predates this repo and is
+# linked to beancounter: an existing package only accepts pushes from repos
+# listed in its own access settings. Grant this one write, once:
+#
+#   ghcr.io/monowai/eclipse-temurin -> Package settings
+#     -> Manage Actions access -> Add repository -> monowai/.github -> Write
+#
+# Without that grant the login succeeds and the push fails with 403 denied.
 
 on:
   workflow_dispatch:
@@ -60,7 +69,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare platform tag
         id: prep
@@ -102,7 +111,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push manifest
         run: |

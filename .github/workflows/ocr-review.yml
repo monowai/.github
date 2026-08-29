@@ -1,0 +1,112 @@
+name: OpenCodeReview (reusable)
+
+# Shared AI code review for the Beancounter repos. Callers live in
+# beancounter, bc-view, svc-retire and svc-rebalance as a ~20-line workflow
+# that owns the triggers and delegates the job here.
+#
+# Wraps the first-party composite action alibaba/open-code-review, pinned to a
+# release tag. That action installs the ocr CLI, checks out the trusted base at
+# fetch-depth 0, fetches the head blobs, and posts inline comments plus a
+# sticky summary.
+#
+# Callers pin this workflow at @v1. To roll a change out everywhere, move the
+# v1 tag — the same convention actions/checkout uses for its major tags. That
+# is what keeps this from being a four-repo sync chore.
+#
+# The caller must pass OCR_LLM_AUTH_TOKEN explicitly. `secrets: inherit` would
+# hand every caller secret to a workflow defined in a public repo; only the one
+# secret is needed.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: "PR number, for workflow_dispatch callers. Empty on ready_for_review."
+        required: false
+        type: string
+      llm_url:
+        description: "LLM endpoint. Defaults to DeepSeek's OpenAI-compatible route."
+        required: false
+        type: string
+        default: https://api.deepseek.com/chat/completions
+      llm_model:
+        description: "Model name."
+        required: false
+        type: string
+        default: deepseek-v4-pro
+      llm_use_anthropic:
+        description: "'true' for the Anthropic protocol, 'false' for OpenAI-compatible."
+        required: false
+        type: string
+        default: "false"
+    secrets:
+      OCR_LLM_AUTH_TOKEN:
+        description: "API key for the LLM endpoint."
+        required: true
+
+jobs:
+  review:
+    name: OpenCodeReview
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    # Fork PRs never receive secrets under the `pull_request` trigger, so the
+    # review would fail on an empty token rather than say anything useful.
+    # Skip them explicitly. Only bites where the calling repo is public
+    # (beancounter), but harmless everywhere else.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      # workflow_dispatch carries no pull_request payload, so the base ref and
+      # head SHA have to be resolved from the PR number. On ready_for_review
+      # these stay empty and the action falls back to the event payload.
+      - name: Resolve dispatch target
+        id: target
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # Passed through env and quoted rather than interpolated into the
+          # command, and constrained to digits so it can never be read as a
+          # flag by gh.
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::pr_number must be digits only, got: $PR_NUMBER"
+              exit 1
+              ;;
+          esac
+          pr=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+                 --json baseRefName,headRefOid,isDraft)
+          if [ "$(jq -r .isDraft <<<"$pr")" = "true" ]; then
+            echo "::error::PR #${PR_NUMBER} is still a draft — promote it or review it locally."
+            exit 1
+          fi
+          {
+            echo "base_ref=$(jq -r .baseRefName <<<"$pr")"
+            echo "head_sha=$(jq -r .headRefOid <<<"$pr")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run OpenCodeReview
+        uses: alibaba/open-code-review@v1.11.0
+        with:
+          llm_url: ${{ inputs.llm_url }}
+          llm_model: ${{ inputs.llm_model }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_use_anthropic: ${{ inputs.llm_use_anthropic }}
+          base_ref: ${{ steps.target.outputs.base_ref }}
+          head_sha: ${{ steps.target.outputs.head_sha }}
+          # Update one summary comment in place instead of stacking a new one
+          # on every run.
+          sticky_summary: "true"
+          # Only append inline comments that do not overlap an existing bot
+          # comment, so a dispatched re-run after fixes does not repeat itself.
+          # History is never deleted.
+          incremental: "true"
+          # Raw JSON result + stderr land as run artifacts, which is what makes
+          # a disputed finding checkable after the fact.
+          upload_artifacts: "true"

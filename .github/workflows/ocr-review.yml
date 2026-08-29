@@ -52,13 +52,24 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # Fork PRs never receive secrets under the `pull_request` trigger, so the
-    # review would fail on an empty token rather than say anything useful.
-    # Skip them explicitly. Only bites where the calling repo is public
-    # (beancounter), but harmless everywhere else.
+    # Two things are excluded here:
+    #
+    # Drafts. Callers trigger on `opened` as well as `ready_for_review`, so
+    # that a PR opened straight into the ready state gets reviewed too —
+    # `ready_for_review` alone only ever fires on a draft->ready transition,
+    # which silently skipped any normally-opened PR. A PR opened as a draft
+    # fires `opened` with draft: true and is skipped here; it gets its review
+    # later, when it is promoted. So each PR is still reviewed exactly once on
+    # becoming ready, by whichever of the two events applies.
+    #
+    # Fork PRs, which never receive secrets under the `pull_request` trigger,
+    # so the review would fail on an empty token rather than say anything
+    # useful. Only bites where the calling repo is public (beancounter), but
+    # harmless everywhere else.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       # workflow_dispatch carries no pull_request payload, so the base ref and
       # head SHA have to be resolved from the PR number. On ready_for_review

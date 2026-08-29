@@ -77,7 +77,7 @@ name: AI Code Review
 
 on:
   pull_request:
-    types: [ready_for_review]
+    types: [opened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -101,10 +101,23 @@ jobs:
 The secret is passed explicitly rather than with `secrets: inherit`, which
 would hand every caller secret to a workflow defined in a public repo.
 
-### Why `ready_for_review`
+### Why `opened` + `ready_for_review`
 
 Draft means "not finished"; Ready means "this is ready to be looked at". Firing
 there puts findings in front of a human *before* they open the PR.
+
+Both event types are needed to mean "when this PR becomes ready", because
+neither covers it alone:
+
+| PR is | Event | Result |
+|---|---|---|
+| opened as a draft | `opened`, `draft: true` | skipped — reviewed later, on promotion |
+| promoted draft → ready | `ready_for_review` | **reviewed** |
+| opened straight into ready | `opened`, `draft: false` | **reviewed** |
+
+`ready_for_review` only ever fires on the transition, so on its own it silently
+skipped every normally-opened PR. The draft filter lives in the shared job's
+`if:`, so each PR is still reviewed exactly once on becoming ready.
 
 It is deliberately not on every push. Each run bills a metered LLM account and
 the agent reads well beyond the diff — one review of a single 14-line file

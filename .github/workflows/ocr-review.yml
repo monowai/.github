@@ -103,6 +103,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run OpenCodeReview
+        id: review
+        # Allowed to fail so the next step can tell the two kinds of failure
+        # apart. An exhausted LLM credit balance (HTTP 402) is an account state
+        # on the review provider, not a defect in the PR, and a bare red X says
+        # the opposite. Any other failure is re-raised there unchanged.
+        continue-on-error: true
         uses: alibaba/open-code-review@v1.11.0
         with:
           llm_url: ${{ inputs.llm_url }}
@@ -121,3 +127,89 @@ jobs:
           # Raw JSON result + stderr land as run artifacts, which is what makes
           # a disputed finding checkable after the fact.
           upload_artifacts: "true"
+
+      # The action writes the CLI's stdout to /tmp/ocr-result.json and its
+      # stderr to /tmp/ocr-stderr.log before failing the job, and both survive
+      # into this step. A provider that rejects every request for lack of
+      # credit shows up there as HTTP 402 — in the rendered retry report
+      # ("rejected by provider (HTTP 402) -> failed") and as a status_code on
+      # the report's attempt records.
+      #
+      # That case gets a plain-English PR comment and a green job: nothing is
+      # wrong with the branch, nothing is blocked, and the fix is an admin
+      # topping up the LLM account. Everything else re-fails the job as before.
+      - name: Explain or re-raise review failure
+        if: steps.review.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          # Quoted through env rather than interpolated into the script body.
+          # Digit-validated above for the dispatch path; the event path is a
+          # number from the payload.
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          LLM_URL: ${{ inputs.llm_url }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
+
+            const stderr = read('/tmp/ocr-stderr.log');
+            const result = read('/tmp/ocr-result.json');
+            const outOfCredit =
+              /rejected by provider \(HTTP 402\)|HTTP 402|402 Payment Required|insufficient[ _]balance|insufficient_quota/i.test(stderr) ||
+              /"status_code"\s*:\s*402/.test(result);
+
+            if (!outOfCredit) {
+              core.setFailed(
+                'OpenCodeReview failed for a reason other than provider billing. ' +
+                'See the step log above and the ocr-review-result artifact on this run.'
+              );
+              return;
+            }
+
+            const host = (() => {
+              try { return new URL(process.env.LLM_URL || '').host; } catch { return 'the LLM provider'; }
+            })();
+            const runUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const MARKER = '<!-- ocr-credit-notice -->';
+            const body = [
+              MARKER,
+              '### 🪙 AI review unavailable — provider credit exhausted',
+              '',
+              `The review never ran: **${host}** rejected the request with **HTTP 402 (Payment Required)**.`,
+              'That is a billing state on the AI account behind the reviewer — **not** a problem with this',
+              'pull request, its branch, or its diff.',
+              '',
+              '- No findings were produced, and none were lost.',
+              '- This check is advisory; nothing here blocks the merge.',
+              '- **Admin action:** top up the AI credit balance, then re-run the review with',
+              '  `gh workflow run ocr-review.yml -f pr_number=' + (process.env.PR_NUMBER || '<N>') + '`',
+              '',
+              `<sub>[Workflow run](${runUrl}) · the full provider response is in the run's \`ocr-review-result\` artifact.</sub>`,
+            ].join('\n');
+
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (Number.isInteger(prNumber) && prNumber > 0) {
+              const { owner, repo } = context.repo;
+              // Sticky: one notice per PR, rewritten in place, so repeated
+              // runs against an empty balance do not stack up.
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: prNumber, per_page: 100,
+              });
+              const existing = comments.find((c) => c.body && c.body.includes(MARKER));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+              }
+            } else {
+              core.warning('No PR number resolved; skipping the PR comment.');
+            }
+
+            core.warning(
+              `AI review skipped: ${host} returned HTTP 402 (out of credit). ` +
+              'Top up the AI account and re-run the review — the PR itself is fine.'
+            );
+            await core.summary.addRaw(body.replace(MARKER, '')).write();

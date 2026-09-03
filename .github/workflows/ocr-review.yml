@@ -52,7 +52,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # Two things are excluded here:
+    # Three things are excluded here:
     #
     # Drafts. Callers trigger on `opened` as well as `ready_for_review`, so
     # that a PR opened straight into the ready state gets reviewed too —
@@ -66,10 +66,18 @@ jobs:
     # so the review would fail on an empty token rather than say anything
     # useful. Only bites where the calling repo is public (beancounter), but
     # harmless everywhere else.
+    #
+    # Renovate PRs (renovate/* branches). Version bumps have nothing for an AI
+    # reviewer to say, and each review bills the metered LLM account. Today
+    # Renovate opens PRs with GITHUB_TOKEN, whose PRs never fire pull_request
+    # workflows anyway — this filter keeps that true if a RENOVATE_TOKEN PAT
+    # is ever introduced. A workflow_dispatch with an explicit PR number still
+    # reviews one on request.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !startsWith(github.event.pull_request.head.ref, 'renovate/'))
     steps:
       # workflow_dispatch carries no pull_request payload, so the base ref and
       # head SHA have to be resolved from the PR number. On ready_for_review

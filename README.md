@@ -123,6 +123,26 @@ It is deliberately not on every push. Each run bills a metered LLM account and
 the agent reads well beyond the diff — one review of a single 14-line file
 measured ~364k tokens and 4m35s.
 
+### Markdown-only PRs are skipped
+
+A PR where every changed file ends in `.md` or `.mdx` has nothing for a code
+reviewer to find, so the review step is skipped and the check reports green —
+the diff is fine and a skipped check says otherwise. What was skipped, and how
+to override it, lands in the run summary.
+
+The test is deliberately narrow. One non-Markdown file puts the whole PR back
+in scope, including a script that happens to sit under `docs/`.
+
+If a prose change does warrant a review, dispatch one:
+
+```bash
+gh workflow run ocr-review.yml -f pr_number=<N>
+```
+
+That is the only exception path — `workflow_dispatch` never applies the skip.
+There is no per-repo opt-out, because none of the repos on this workflow wants
+its Markdown reviewed.
+
 To re-review after pushing fixes:
 
 ```bash

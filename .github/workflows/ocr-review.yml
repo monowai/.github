@@ -73,6 +73,10 @@ jobs:
     # workflows anyway — this filter keeps that true if a RENOVATE_TOKEN PAT
     # is ever introduced. A workflow_dispatch with an explicit PR number still
     # reviews one on request.
+    #
+    # Markdown-only PRs are excluded too, but a step down — see "Detect
+    # docs-only change". Skipping there keeps the check green instead of
+    # skipped, because the diff is fine and nothing should look otherwise.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
@@ -110,8 +114,65 @@ jobs:
             echo "head_sha=$(jq -r .headRefOid <<<"$pr")"
           } >> "$GITHUB_OUTPUT"
 
+      # A PR that only touches Markdown has nothing for a code reviewer to
+      # find, and every run bills the metered LLM account, so the review is
+      # skipped here rather than at job level — the check still reports, and
+      # still reports green.
+      #
+      # "Docs" is deliberately narrow: a file counts only if it ends in .md or
+      # .mdx. Anything else in the diff puts the whole PR back in scope,
+      # including a script that happens to sit under docs/.
+      #
+      # workflow_dispatch is never skipped. Dispatching a review by hand is the
+      # escape hatch for a prose change that does warrant one — there is no
+      # per-repo opt-out to configure, and none is wanted for the repos on this
+      # workflow today.
+      - name: Detect docs-only change
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Only read on the event path. The dispatch path returns before this
+          # is touched, so the caller-supplied number never reaches the API.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # `|| true` so a transient API failure cannot fail the review job:
+          # it leaves $files empty, which is handled below as "review it".
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                    --paginate --jq '.[].filename' || true)
+          # An empty list means the API told us nothing usable — a PR always has
+          # files. Fall through and review it rather than skip on a bad read.
+          if [ -z "$files" ] || printf '%s\n' "$files" | grep -qvE '\.mdx?$'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Note skipped review
+        if: steps.scope.outputs.docs_only == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          note="Markdown-only pull request — AI review skipped, nothing is blocked."
+          echo "::notice::${note} Review it anyway with: gh workflow run ocr-review.yml -f pr_number=${PR_NUMBER}"
+          {
+            echo "### 📝 AI review skipped — Markdown only"
+            echo
+            echo "$note Every changed file ends in \`.md\` or \`.mdx\`, and each"
+            echo "review bills a metered LLM account."
+            echo
+            echo "Want one anyway? \`gh workflow run ocr-review.yml -f pr_number=${PR_NUMBER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run OpenCodeReview
         id: review
+        if: steps.scope.outputs.docs_only != 'true'
         # Allowed to fail so the next step can tell the two kinds of failure
         # apart. An exhausted LLM credit balance (HTTP 402) is an account state
         # on the review provider, not a defect in the PR, and a bare red X says

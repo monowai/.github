@@ -21,7 +21,11 @@ on:
   workflow_call:
     inputs:
       pr_number:
-        description: "PR number, for workflow_dispatch callers. Empty on ready_for_review."
+        description: >-
+          Unused. Kept so existing `gh workflow run ... -f pr_number=N` calls
+          still parse and reach the explanatory failure rather than a cryptic
+          "unexpected input" error. Dispatch cannot post a review — see the
+          Reject unsupported dispatch step.
         required: false
         type: string
       llm_url:
@@ -83,36 +87,37 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        !startsWith(github.event.pull_request.head.ref, 'renovate/'))
     steps:
-      # workflow_dispatch carries no pull_request payload, so the base ref and
-      # head SHA have to be resolved from the PR number. On ready_for_review
-      # these stay empty and the action falls back to the event payload.
-      - name: Resolve dispatch target
-        id: target
+      # workflow_dispatch is NOT supported by the review action, and the failure
+      # is expensive: the review runs to completion (billing the metered LLM
+      # account) and only then throws while posting, so nothing reaches the PR.
+      #
+      # alibaba/open-code-review resolves the PR from `context.issue.number`
+      # and, up to v1.11.0, the head SHA from
+      # `context.payload.pull_request.head.sha`. A workflow_dispatch event
+      # carries neither. v1.12.1 takes the SHA from the result manifest
+      # instead, but still has no way to learn the PR number and offers no
+      # input to supply one, so bumping the pin does not fix this — it only
+      # moves the failure later.
+      #
+      # Fail before the review step rather than after, and point at the path
+      # that does work: converting the PR to draft and back to ready re-fires
+      # `ready_for_review`, which is a supported trigger and costs one review.
+      - name: Reject unsupported dispatch
         if: github.event_name == 'workflow_dispatch'
         env:
-          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
-          # Passed through env and quoted rather than interpolated into the
-          # command, and constrained to digits so it can never be read as a
-          # flag by gh.
-          case "$PR_NUMBER" in
-            ''|*[!0-9]*)
-              echo "::error::pr_number must be digits only, got: $PR_NUMBER"
-              exit 1
-              ;;
-          esac
-          pr=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-                 --json baseRefName,headRefOid,isDraft)
-          if [ "$(jq -r .isDraft <<<"$pr")" = "true" ]; then
-            echo "::error::PR #${PR_NUMBER} is still a draft — promote it or review it locally."
-            exit 1
-          fi
           {
-            echo "base_ref=$(jq -r .baseRefName <<<"$pr")"
-            echo "head_sha=$(jq -r .headRefOid <<<"$pr")"
-          } >> "$GITHUB_OUTPUT"
+            echo "::error::Dispatching this workflow cannot post a review."
+            echo "The review action reads the PR number and head SHA from the"
+            echo "event payload, and workflow_dispatch has neither. Running it"
+            echo "anyway bills a full review and then fails while posting."
+            echo ""
+            echo "To re-review PR #${PR_NUMBER:-<N>} after fixes, convert it to"
+            echo "a draft and back to ready — that re-fires ready_for_review."
+          } >&2
+          exit 1
 
       # A PR that only touches Markdown has nothing for a code reviewer to
       # find, and every run bills the metered LLM account, so the review is
@@ -160,14 +165,14 @@ jobs:
         run: |
           set -euo pipefail
           note="Markdown-only pull request — AI review skipped, nothing is blocked."
-          echo "::notice::${note} Review it anyway with: gh workflow run ocr-review.yml -f pr_number=${PR_NUMBER}"
+          echo "::notice::${note} Want one anyway? Add a non-Markdown change, or convert the PR to a draft and back to ready."
           {
             echo "### 📝 AI review skipped — Markdown only"
             echo
             echo "$note Every changed file ends in \`.md\` or \`.mdx\`, and each"
             echo "review bills a metered LLM account."
             echo
-            echo "Want one anyway? \`gh workflow run ocr-review.yml -f pr_number=${PR_NUMBER}\`"
+            echo "Want one anyway? Add a non-Markdown change, or convert the PR to a draft and back to ready."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run OpenCodeReview
@@ -184,8 +189,6 @@ jobs:
           llm_model: ${{ inputs.llm_model }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic }}
-          base_ref: ${{ steps.target.outputs.base_ref }}
-          head_sha: ${{ steps.target.outputs.head_sha }}
           # Update one summary comment in place instead of stacking a new one
           # on every run.
           sticky_summary: "true"
@@ -253,8 +256,8 @@ jobs:
               '',
               '- No findings were produced, and none were lost.',
               '- This check is advisory; nothing here blocks the merge.',
-              '- **Admin action:** top up the AI credit balance, then re-run the review with',
-              '  `gh workflow run ocr-review.yml -f pr_number=' + (process.env.PR_NUMBER || '<N>') + '`',
+              '- **Admin action:** top up the AI credit balance, then re-run the review by',
+              '  converting this PR to a draft and back to ready.',
               '',
               `<sub>[Workflow run](${runUrl}) · the full provider response is in the run's \`ocr-review-result\` artifact.</sub>`,
             ].join('\n');

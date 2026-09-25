@@ -72,11 +72,11 @@ jobs:
     # harmless everywhere else.
     #
     # Renovate PRs (renovate/* branches). Version bumps have nothing for an AI
-    # reviewer to say, and each review bills the metered LLM account. Today
-    # Renovate opens PRs with GITHUB_TOKEN, whose PRs never fire pull_request
-    # workflows anyway — this filter keeps that true if a RENOVATE_TOKEN PAT
-    # is ever introduced. A workflow_dispatch with an explicit PR number still
-    # reviews one on request.
+    # reviewer to say, and each review bills the metered LLM account. Renovate
+    # runs as the hosted Mend app, whose PRs open ready and fire `opened`, so
+    # without this filter every one of them would be reviewed. Keep the app's
+    # default `renovate/` branch prefix. A workflow_dispatch with an explicit
+    # PR number still reviews one on request.
     #
     # Markdown-only PRs are excluded too, but a step down — see "Detect
     # docs-only change". Skipping there keeps the check green instead of

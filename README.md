@@ -7,6 +7,7 @@ by several repos, which should not live inside any one of them.
 |---|---|
 | [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
 | [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
+| [`mirror-images.yml`](.github/workflows/mirror-images.yml) | Copies third-party images into `ghcr.io/monowai` so builds never pull them anonymously. Runs here, by hand. |
 
 > This repo is **public** so that `beancounter` (also public) can call the
 > workflows here without any cross-visibility access configuration. Nothing
@@ -59,6 +60,46 @@ listed in its own access settings. Grant this one write, once:
 Without that grant, the login step succeeds and the push fails with `403
 denied` — so a dispatch run is a cheap, safe way to confirm the grant is in
 place.
+
+## `mirror-images.yml` — third-party images, mirrored
+
+Copies an image that an estate Dockerfile depends on into `ghcr.io/monowai`.
+Today that is **`ghcr.io/monowai/aws-lambda-adapter`**, the AWS Lambda Web
+Adapter, which `ruby`'s `docker/Dockerfile` copies in.
+
+The upstream is `public.ecr.aws/awsguru/aws-lambda-adapter`. ECR rations
+anonymous pulls per source IP, and GitHub's runners share their IPs, so
+`ruby`'s image build failed on `main` with `toomanyrequests: Data limit
+exceeded` twice in September 2026 even though its code had not changed. A
+mirror in GHCR avoids that.
+
+It lives here rather than in `ruby` because this repo is public. Its runs
+cost no Actions minutes, the package can be public so builds and laptops pull
+it without logging in, and a second service that moves to Lambda will find
+it here.
+
+```bash
+gh workflow run mirror-images.yml -R monowai/.github -f version=0.9.1
+```
+
+The job summary prints `ghcr.io/monowai/aws-lambda-adapter:<version>@<digest>`.
+Consumers pin that digest. Bumping the adapter is two steps: run this with the
+new version, then change the tag and digest in the consumer's Dockerfile.
+Renovate does not watch the mirror.
+
+The copy pulls from ECR on a GitHub runner, so it can hit the same limit. It
+is one pull per version, so re-run it if that happens.
+
+**One-time check after the first run.** The first run creates the package.
+It must be public, because `ruby` is private and pulls it with its own token.
+Check without credentials:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' 'https://ghcr.io/token?scope=repository:monowai/aws-lambda-adapter:pull'
+```
+
+`200` means public. `401` means private. To fix that, open the package on
+GitHub, then Package settings → Change visibility → Public.
 
 ## `ocr-review.yml` — AI code review
 

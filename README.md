@@ -73,9 +73,8 @@ anonymous pulls per source IP, and GitHub's runners share their IPs, so
 exceeded` twice in September 2026 even though its code had not changed. A
 mirror in GHCR avoids that.
 
-It lives here rather than in `ruby` because this repo is public. Its runs
-cost no Actions minutes, the package can be public so builds and laptops pull
-it without logging in, and a second service that moves to Lambda will find
+It lives here rather than in `ruby` because this repo is public, so its runs
+cost no Actions minutes. A second service that moves to Lambda will also find
 it here.
 
 ```bash
@@ -90,16 +89,20 @@ Renovate does not watch the mirror.
 The copy pulls from ECR on a GitHub runner, so it can hit the same limit. It
 is one pull per version, so re-run it if that happens.
 
-**One-time check after the first run.** The first run creates the package.
-It must be public, because `ruby` is private and pulls it with its own token.
-Check without credentials:
+**The package is private.** Only monowai repositories pull it. It is linked
+to `monowai/ruby`, because `ruby`'s own copy of this workflow made the first
+mirror on 2026-09-30. Access is granted per repository, under
+`ghcr.io/monowai/aws-lambda-adapter` → Package settings → **Manage Actions
+access**:
 
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' 'https://ghcr.io/token?scope=repository:monowai/aws-lambda-adapter:pull'
-```
+| Repository | Access | Why |
+|---|---|---|
+| `monowai/ruby` | linked | Its image build copies the adapter in. |
+| `monowai/.github` | **Write**, not yet granted | Needed before this workflow can push the next version. Without it the copy fails with `denied: permission_denied: read_package`. |
 
-`200` means public. `401` means private. To fix that, open the package on
-GitHub, then Package settings → Change visibility → Public.
+Another repository that starts using the adapter needs **Read** added there
+too. On a laptop, run `docker login ghcr.io` with a token that has
+`read:packages` before a local build.
 
 ## `ocr-review.yml` — AI code review
 

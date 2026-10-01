@@ -10,10 +10,14 @@ name: Mirror Images
 # ruby's main image build failed with "toomanyrequests: Data limit exceeded"
 # in runs 36138945219 and 36653512927 through no change of its own.
 #
-# It lives here, not in ruby, because this repository is public: its runs
-# cost no Actions minutes, the mirror can be public so any repository or
-# laptop pulls it without logging in, and a second service moving to Lambda
-# finds it already here.
+# It lives here, not in ruby, because this repository is public, so its runs
+# cost no Actions minutes, and a second service moving to Lambda finds it
+# already here.
+#
+# The package itself is private: only monowai repositories pull it. It is
+# linked to monowai/ruby, whose own copy of this workflow made the first
+# mirror on 2026-09-30, so this repository needs Write on it before it can
+# push another version (README).
 #
 # Run it by hand when a Dockerfile moves to a new adapter version, then pin
 # the Dockerfile to the tag and the digest this prints in the job summary:
@@ -23,8 +27,7 @@ name: Mirror Images
 # limit. It is one pull per version: re-run it.
 #
 # Authenticates with the built-in GITHUB_TOKEN and `packages: write`, as
-# build-base-image.yml does. The first run creates the package, linked to
-# this repository. Check it is public (README).
+# build-base-image.yml does.
 
 on:
   workflow_dispatch:

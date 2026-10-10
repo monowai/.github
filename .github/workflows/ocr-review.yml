@@ -196,9 +196,41 @@ jobs:
           # comment, so a dispatched re-run after fixes does not repeat itself.
           # History is never deleted.
           incremental: "true"
-          # Raw JSON result + stderr land as run artifacts, which is what makes
-          # a disputed finding checkable after the fact.
-          upload_artifacts: "true"
+          # The action's own upload step is skipped and done below instead.
+          # Inside the action a failed upload fails the whole review step,
+          # which the next step would then re-raise as a review failure.
+          upload_artifacts: "false"
+
+      # Raw JSON result + stderr land as run artifacts, which is what makes a
+      # disputed finding checkable after the fact. The upload is best-effort:
+      # when the org's Actions artifact storage quota is exhausted GitHub
+      # rejects every CreateArtifact, and that is an account state, not a
+      # defect in the PR. The review has already run and its findings are
+      # posted from /tmp, so a failed upload only costs the audit trail.
+      - name: Upload review artifacts
+        id: upload
+        if: always() && contains(fromJSON('["success","failure"]'), steps.review.outcome)
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocr-review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ocr-result.json
+            /tmp/ocr-stderr.log
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Note failed artifact upload
+        if: steps.upload.outcome == 'failure'
+        run: |
+          echo "::warning::Could not upload the ocr-review-result artifact (usually the org's Actions artifact storage quota). The review ran and its findings are posted; only the raw provider response is missing from this run."
+          {
+            echo "### ⚠️ Review artifact not uploaded"
+            echo
+            echo "The review ran and its findings are posted on the PR. Uploading the raw"
+            echo "provider response as a run artifact failed — usually because the org's"
+            echo "Actions artifact storage quota is exhausted. Nothing is blocked."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The action writes the CLI's stdout to /tmp/ocr-result.json and its
       # stderr to /tmp/ocr-stderr.log before failing the job, and both survive

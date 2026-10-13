@@ -34,10 +34,15 @@ on:
         type: string
         default: https://api.deepseek.com/chat/completions
       llm_model:
+        # deepseek-flash, not deepseek-v4-pro: on the same diffs (five planted
+        # defects, two real commits, 2026-10-13) flash found all five planted
+        # defects with no false alarms, as v4-pro did, at a third of the cost
+        # and two to three times the speed. v4-pro went deeper on one design
+        # issue; a caller can pass `llm_model: deepseek-v4-pro` for that.
         description: "Model name."
         required: false
         type: string
-        default: deepseek-v4-pro
+        default: deepseek-flash
       llm_use_anthropic:
         description: "'true' for the Anthropic protocol, 'false' for OpenAI-compatible."
         required: false

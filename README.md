@@ -198,6 +198,23 @@ why there is an explicit dispatch path that resolves the current head.
 `incremental: true` means a re-run only appends inline comments that do not
 overlap existing ones, and never deletes history.
 
+### Switching the CI review off per repo
+
+A caller can run the review locally instead (the `ocr` CLI through the
+waharoa gateway) and turn the CI pass off with a repository Actions variable:
+
+```bash
+gh variable set OCR_CI_ENABLED -R monowai/<repo> --body false   # off
+gh variable delete OCR_CI_ENABLED -R monowai/<repo>             # on again
+```
+
+The job's `if:` reads `vars.OCR_CI_ENABLED != 'false'`; a reusable
+workflow sees the caller's `vars`, so the switch is per repo and needs no
+change to the caller file. The check then reports as skipped. A
+`workflow_dispatch` ignores the variable (and still cannot post, see above).
+Set to `false` on beancounter, bc-view, svc-retire, svc-rebalance, fantail
+and svc-bff on 2026-10-13.
+
 ### Inputs
 
 | Input | Default | Notes |

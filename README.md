@@ -221,7 +221,7 @@ and svc-bff on 2026-10-13.
 |---|---|---|
 | `pr_number` | — | Required for `workflow_dispatch`; empty on `ready_for_review`, where the event payload supplies the refs. |
 | `llm_url` | `https://api.deepseek.com/chat/completions` | |
-| `llm_model` | `deepseek-v4-pro` | |
+| `llm_model` | `deepseek-flash` | Matched `deepseek-v4-pro` on a planted-defect test at a third of the cost; pass `deepseek-v4-pro` for a deeper pass |
 | `llm_use_anthropic` | `"false"` | `"true"` selects the Anthropic protocol. |
 
 | Secret | Required |

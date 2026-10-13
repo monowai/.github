@@ -81,9 +81,17 @@ jobs:
     # Markdown-only PRs are excluded too, but a step down — see "Detect
     # docs-only change". Skipping there keeps the check green instead of
     # skipped, because the diff is fine and nothing should look otherwise.
+    #
+    # Repos that review locally instead (the `ocr` CLI through the waharoa
+    # gateway, since 2026-10-13) set the Actions variable OCR_CI_ENABLED=false
+    # (`gh variable set OCR_CI_ENABLED -R monowai/<repo> --body false`); the
+    # `vars` context of a reusable workflow is the caller's, so the switch is
+    # per repo. Unset or any other value keeps the CI review on. A
+    # workflow_dispatch is not gated by it.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.draft == false &&
+      (vars.OCR_CI_ENABLED != 'false' &&
+       github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        !startsWith(github.event.pull_request.head.ref, 'renovate/'))
     steps:

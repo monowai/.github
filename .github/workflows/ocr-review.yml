@@ -56,7 +56,14 @@ on:
 jobs:
   review:
     name: OpenCodeReview
-    runs-on: ubuntu-latest
+    # CI_RUNNER, the caller's repository variable, moves the review onto that
+    # repository's self-hosted Linux runner (kauri, see network/GH_RUNNER.md):
+    # the `vars` context of a reusable workflow is the caller's, so the switch
+    # is per repo, the same one build.yml reads. Unset, GitHub's runner. The
+    # fork and Renovate exclusions in `if:` below keep unreviewed code off the
+    # self-hosted runner, as the callers' build.yml guards do. Hosted minutes
+    # ran out on 2026-10-26 and every review was refused.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
       contents: read

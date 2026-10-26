@@ -198,6 +198,22 @@ why there is an explicit dispatch path that resolves the current head.
 `incremental: true` means a re-run only appends inline comments that do not
 overlap existing ones, and never deletes history.
 
+### Where it runs
+
+The job runs on the caller's self-hosted Linux runner when the caller sets
+the repository variable `CI_RUNNER` (`kauri`, the Lima VM on Kauri: see
+`network/GH_RUNNER.md`), and on `ubuntu-latest` otherwise. It is the same
+variable each caller's `build.yml` reads, so one switch moves both. The job's
+own `if:` keeps fork PRs and `renovate/*` branches off the self-hosted
+runner. The VM carries `gh` for the Markdown-only check; `node` comes from
+`setup-node` inside the review action. Since 2026-10-26, when hosted minutes
+ran out and every review was refused.
+
+```bash
+gh variable set CI_RUNNER -R monowai/<repo> --body kauri    # on kauri
+gh variable delete CI_RUNNER -R monowai/<repo>              # back to GitHub
+```
+
 ### Switching the CI review off per repo
 
 A caller can run the review locally instead (the `ocr` CLI through the

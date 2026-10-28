@@ -7,7 +7,7 @@ step fails with "Artifact storage quota has been hit". This script keeps
 that pool small:
 
 1. Workflow runs whose branch no longer exists are deleted, in every
-   non-archived repository. Their artifacts go with them. Runs on the
+   non-archived repository the token's owner has, private ones included. Their artifacts go with them. Runs on the
    default branch are never touched.
 2. Container packages (ghcr.io/monowai/*) keep only what is deployed:
    the version tagged `latest` or `main`, the version bc-deploy pins as a
@@ -103,7 +103,10 @@ def file_at(repo: str, path: str) -> str:
 
 
 def purge_runs(cutoff: datetime, dry_run: bool) -> int:
-    repos = gh(f"users/{OWNER}/repos?per_page=100", paginate=True)
+    # users/<owner>/repos lists public repositories only; the authenticated
+    # owner's own listing includes the private ones (svc-retire, bc-mobile,
+    # beachdaze, shiftchain, fantail).
+    repos = gh("user/repos?affiliation=owner&per_page=100", paginate=True)
     total = 0
     for repo in repos:
         if repo["archived"]:

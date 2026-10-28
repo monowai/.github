@@ -1,0 +1,53 @@
+name: Storage Cleanup
+
+# Weekly purge of what eats the shared Actions-plus-Packages storage pool:
+# workflow runs on deleted branches (and their artifacts), container image
+# versions nobody deploys, and shared-jar versions nobody pins. Policy and
+# the keep rules live in scripts/storage-cleanup.py.
+#
+# Lives here, not in bc-deploy, because it spans every monowai repository
+# and this repository is public, so its runs cost no Actions minutes.
+#
+# Needs STORAGE_CLEANUP_TOKEN: a classic PAT with `repo`, `read:packages`
+# and `delete:packages`. GITHUB_TOKEN cannot delete packages owned by the
+# account or runs in other repositories.
+#
+# Run by hand with the dry-run box ticked to see what a pass would remove:
+#   gh workflow run storage-cleanup.yml -R monowai/.github -f dry_run=true
+
+on:
+  schedule:
+    - cron: '17 3 * * 1' # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report only, delete nothing'
+        type: boolean
+        default: false
+      min_age_days:
+        description: 'Never touch anything younger than this'
+        default: '7'
+
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.STORAGE_CLEANUP_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Purge
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          MIN_AGE_DAYS: ${{ inputs.min_age_days || '7' }}
+        run: |
+          flags=()
+          [ "$DRY_RUN" = "true" ] && flags+=(--dry-run)
+          python3 -I scripts/storage-cleanup.py "${flags[@]}" --min-age-days "$MIN_AGE_DAYS" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

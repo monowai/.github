@@ -8,6 +8,7 @@ by several repos, which should not live inside any one of them.
 | [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
 | [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
 | [`mirror-images.yml`](.github/workflows/mirror-images.yml) | Copies third-party images into `ghcr.io/monowai` so builds never pull them anonymously. Runs here, by hand. |
+| [`storage-cleanup.yml`](.github/workflows/storage-cleanup.yml) | Weekly purge of workflow runs on deleted branches, undeployed image versions and unpinned jar versions. Policy in [`scripts/storage-cleanup.py`](scripts/storage-cleanup.py). Runs here, Mondays. |
 
 > This repo is **public** so that `beancounter` (also public) can call the
 > workflows here without any cross-visibility access configuration. Nothing
@@ -257,3 +258,31 @@ git tag -f v1 && git push -f origin v1
 ```
 
 Breaking changes to the inputs get a `v2` and a deliberate caller migration.
+
+## `storage-cleanup.yml` — weekly storage purge
+
+Actions artifacts and GitHub Packages share one storage pool. When it is
+exhausted every `upload-artifact` step fails with
+`Artifact storage quota has been hit`. Every Monday this job runs
+`scripts/storage-cleanup.py`, which keeps:
+
+- workflow runs on the default branch and on branches that still exist;
+- for each `ghcr.io/monowai/*` image, the version tagged `latest`/`main` and
+  the one `bc-deploy` pins as a chart's `appVersion`, with their arch
+  manifests; `eclipse-temurin` and `aws-lambda-adapter` keep every tag
+  because Dockerfiles pin them; an image with no chart keeps its newest three;
+- for `com.beancounter.jar-*`, the newest version and the ones `svc-retire`,
+  `svc-rebalance` and `bc-mobile` pin as `beancounterVersion`;
+- anything younger than seven days.
+
+Everything else is deleted. Package versions can be restored from the
+package's settings page for 30 days.
+
+Needs the repository secret `STORAGE_CLEANUP_TOKEN`: a classic PAT with
+`repo`, `read:packages` and `delete:packages`. Preview a pass before trusting it:
+
+```bash
+gh workflow run storage-cleanup.yml -R monowai/.github -f dry_run=true
+# or locally, with a token of the same scopes in the keyring:
+python3 -I scripts/storage-cleanup.py --dry-run
+```

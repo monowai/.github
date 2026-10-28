@@ -27,6 +27,11 @@ on:
       min_age_days:
         description: 'Never touch anything younger than this'
         default: '7'
+      only:
+        description: 'Limit to one stage'
+        type: choice
+        options: [all, runs, containers, maven]
+        default: all
 
 permissions: {}
 
@@ -46,8 +51,10 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           MIN_AGE_DAYS: ${{ inputs.min_age_days || '7' }}
+          ONLY: ${{ inputs.only || 'all' }}
         run: |
           flags=()
           [ "$DRY_RUN" = "true" ] && flags+=(--dry-run)
+          [ "$ONLY" != "all" ] && flags+=(--only "$ONLY")
           python3 -I scripts/storage-cleanup.py "${flags[@]}" --min-age-days "$MIN_AGE_DAYS" \
             | tee -a "$GITHUB_STEP_SUMMARY"

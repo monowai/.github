@@ -141,6 +141,14 @@ printf '%s' "$APP_STORE_API_ISSUER" | set_secret ASC_ISSUER_ID
 set_secret ASC_KEY_P8 <"$key_file"
 base64 -i "$p12" | set_secret IOS_DIST_CERT_P12
 printf '%s' "$p12_password" | set_secret IOS_DIST_CERT_PASSWORD
-while IFS= read -r file; do base64 -i "$file"; done <"$work/profiles" | set_secret IOS_PROVISIONING_PROFILES
+# One gzipped tar: a secret holds at most 48 KB, and four profiles in plain
+# base64 already pass 64 KB.
+mkdir "$work/bundle"
+count=0
+while IFS= read -r file; do
+  count=$((count + 1))
+  cp "$file" "$work/bundle/$count.mobileprovision"
+done <"$work/profiles"
+tar -czf - -C "$work/bundle" . | base64 | set_secret IOS_PROVISIONING_PROFILES
 
 gh secret list -R "$repo" --env app-store

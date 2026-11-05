@@ -234,6 +234,33 @@ jobs:
             echo "Installed profile $name ($uuid)"
           done
 
+      # Seconds here instead of a signing error deep in xcodebuild: every bundle
+      # ID in ExportOptions.plist needs an installed App Store profile with
+      # exactly that name and that bundle ID.
+      - name: Profiles match ExportOptions
+        env:
+          EXPORT_OPTIONS: ${{ inputs.export-options }}
+        run: |
+          python3 - "$EXPORT_OPTIONS" "$RUNNER_TEMP/profiles.installed" <<'EOF'
+          import plistlib, subprocess, sys
+
+          export = plistlib.load(open(sys.argv[1], "rb"))
+          team = export["teamID"]
+          installed = {}
+          for path in sorted(set(open(sys.argv[2]).read().split("\n")) - {""}):
+              profile = plistlib.loads(subprocess.run(["security", "cms", "-D", "-i", path], capture_output=True, check=True).stdout)
+              installed[(profile["Name"], profile["Entitlements"]["application-identifier"])] = path
+          missing = [
+              f"'{name}' for {bundle}"
+              for bundle, name in export["provisioningProfiles"].items()
+              if (name, f"{team}.{bundle}") not in installed
+          ]
+          if missing:
+              have = ", ".join(f"'{n}' ({a.split('.', 1)[1]})" for n, a in sorted(installed))
+              sys.exit(f"IOS_PROVISIONING_PROFILES lacks {'; '.join(missing)}. It holds: {have}. Re-run scripts/app-store-secrets.sh.")
+          print("Every ExportOptions profile is installed")
+          EOF
+
       - name: Generate Xcode project
         if: inputs.xcodegen
         run: xcodegen generate

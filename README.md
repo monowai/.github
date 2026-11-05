@@ -108,72 +108,70 @@ too. On a laptop, run `docker login ghcr.io` with a token that has
 
 ## `ios-testflight.yml` — iOS and tvOS releases to TestFlight
 
-Archives an iOS or tvOS app on kauri's macOS runner (`kauri-mac`,
-`network/GH_MAC_RUNNER.md`), signs it for the App Store, uploads it to
+Archives an iOS or tvOS app on kauri's macOS runner, signs it, uploads it to
 TestFlight, tags the commit `<platform>/<version>+<build>` and publishes a
-GitHub Release. One workflow for every app: bc-mobile, RunRuby's phone app and
-ShiftChain, then BeachDaze (iOS and tvOS). Google Play is a separate workflow
-with its own release cycle, still to come (#14).
+prerelease with notes since that platform's previous tag. The build number is
+App Store Connect's highest + 1.
 
-**Release by commit type; the scope names the platforms.** The squash-merged
-PR title is the switch:
+The release process, commit scopes (`release(ios)`, `release(tvos)`,
+`release(ios,tvos)`), signing material, profile naming, per-repository setup
+and troubleshooting are in **bc-claude `MOBILE_RELEASE.md`**. This section is
+the workflow's interface.
 
-| Subject | Ships |
-|---|---|
-| `release(ios): portfolio totals and widget header` | iOS |
-| `release(tvos): top shelf artwork` | tvOS |
-| `release(ios,tvos): shared playback fix` | both, as two uploads |
-| `release(android): …` | Google Play, once #14 lands |
+| Input | Default | |
+|---|---|---|
+| `working-directory` | (required) | Holds `project.yml` / the `.xcodeproj` |
+| `scheme` | (required) | Scheme to archive |
+| `bundle-id` | (required) | Finds the App Store Connect record |
+| `platform` | `ios` | `ios` or `tvos`: destination, upload type, scope and tag prefix |
+| `export-options` | `ExportOptions.plist` | Relative to `working-directory` |
+| `xcodegen` | `true` | Run `xcodegen generate` first |
+| `java-version` | `""` | Temurin JDK for builds that run Gradle |
+| `runner` | `kauri-mac` | No hosted fallback |
 
-Each platform keeps its own cycle: an iOS release never ships tvOS. A caller
-calls the workflow once per platform it builds, on any push to `main` whose
-subject starts `release(`. The workflow's first job, `release`, reads the scope
-and continues only when it names that call's `platform`, because a caller's
-`if:` expression cannot split a scope list. The upload `needs` the caller's
-test jobs, so a red build never ships. `workflow_dispatch` on `main` always
-releases, to re-release without a new commit.
+Secrets, from the caller's `app-store` environment, passed by name (not
+`secrets: inherit`: this repository is public): `ASC_KEY_ID`, `ASC_ISSUER_ID`,
+`ASC_KEY_P8`, `IOS_DIST_CERT_P12`, `IOS_DIST_CERT_PASSWORD`,
+`IOS_PROVISIONING_PROFILES`, and optional `GH_GCR` (GitHub Packages, archive step
+only). [`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh)
+`monowai/<repo>` sets the six from the repository's committed
+`ExportOptions*.plist`.
 
-**Each upload is tagged and released.** The tag is `ios/0.1.0+34` or
-`tvos/1.2.0+7`, so `git tag -l 'ios/*'` says which commit each TestFlight build
-is. The GitHub Release is a prerelease (TestFlight is not the App Store), never
-marked latest, named `<scheme> <platform> <version> (<build>)`, with GitHub's
-generated notes since the same platform's previous tag.
-
-**Build numbers come from App Store Connect**, one past the highest build it
-holds, and are passed to `xcodebuild` as `CURRENT_PROJECT_VERSION`. Nothing in
-the repository is bumped, and an app extension gets the same number when its
-Info.plist reads `$(CURRENT_PROJECT_VERSION)`. `MARKETING_VERSION` stays in the
-project and is changed on purpose.
-
-**Signing material lives for one job.** The runner is shared by every app
-repository's PR builds, so the job builds a temporary keychain, installs the
-profiles, and removes both in an `if: always()` step. Nothing persists in the
-`runner` account.
-
-### Calling it
-
-The caller passes each secret by name, not `secrets: inherit`: this repository
-is public and should see only what it uses. One job per platform; a tvOS call
-adds `platform: tvos` and its own scheme and ExportOptions.
+The workflow's first job reads the commit subject and releases only the
+platforms its scope names. A dispatch releases every platform, or only those in
+the caller's `workflow_dispatch` input `platforms` when it has one.
 
 ```yaml
-  testflight:
-    needs: [test]   # the caller's own test jobs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      platforms:            # optional; only for apps with more than one
+        description: "Platforms to release: ios, tvos or ios,tvos (empty: all)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}   # never cancel a release
+
+jobs:
+  # ... the app's test jobs ...
+  testflight-ios:
+    needs: [test]
     if: >-
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' ||
        startsWith(github.event.head_commit.message, 'release('))
     permissions:
-      contents: write   # pushes the tag and creates the release
+      contents: write   # tag and release
     uses: monowai/.github/.github/workflows/ios-testflight.yml@v1
     with:
-      working-directory: iosApp        # holds project.yml or the .xcodeproj
+      working-directory: .
       scheme: MyApp
       bundle-id: com.monowai.myapp
-      # platform: ios                        (or tvos)
-      # export-options: ExportOptions.plist  (relative to working-directory)
-      # xcodegen: true
-      # java-version: "21"                   (Kotlin Multiplatform apps)
+      platform: ios
     secrets:
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -181,73 +179,11 @@ adds `platform: tvos` and its own scheme and ExportOptions.
       IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
       IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
       IOS_PROVISIONING_PROFILES: ${{ secrets.IOS_PROVISIONING_PROFILES }}
-      # GH_GCR: ${{ secrets.GH_GCR }}     (Gradle builds that pull GitHub Packages)
 ```
 
-Two traps in the caller:
-
-- A workflow-level `concurrency` with `cancel-in-progress: true` cancels a
-  release when the next commit lands on `main`. Make it
-  `${{ github.ref != 'refs/heads/main' }}`.
-- A `paths:` filter on the push trigger means the release commit must touch
-  those paths, or nothing runs. Use `workflow_dispatch` otherwise.
-
-Commit `ExportOptions.plist` beside the project. It names the team, the
-`app-store-connect` method, manual signing with `Apple Distribution`, and the
-profile for each bundle ID. Nothing in it is secret.
-
-### One-time setup per app repository
-
-`monowai` is a personal account, so there are no organisation secrets: each
-app repository holds its own copy. An `app-store` environment secret is also
-the tighter scope, since it reaches only jobs on `main`, never PR builds.
-[`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh) does the whole
-setup in one command from the laptop that holds the signing material:
-
-```bash
-scripts/app-store-secrets.sh monowai/<repo>
-```
-
-It creates the `app-store` environment (deployable from `main`, no
-reviewers: the commit type is the gate) and sets `ASC_KEY_ID`,
-`ASC_ISSUER_ID`, `ASC_KEY_P8`, `IOS_DIST_CERT_P12`, `IOS_DIST_CERT_PASSWORD`
-and `IOS_PROVISIONING_PROFILES`. It reads:
-
-- **The profile list from the repository.** The committed
-  `ExportOptions.plist` on the default branch maps each bundle ID the archive
-  signs (app and extensions) to its App Store profile name. That file is what
-  the export signs with, so it is the only list; commit it before running the
-  script. Each profile must be in Xcode's profile folders with exactly that
-  name *and* that bundle ID, be an App Store profile, and not have expired,
-  or nothing is set. On a mismatch the script names the profiles it does
-  have for that bundle ID.
-- `~/.appstoreconnect/ci/AuthKey_<key id>.p8`: the CI team key, role
-  Developer (the least that uploads builds). Exactly one key in that folder.
-- `~/.appstoreconnect/ci/dist.p12`: the Apple Distribution certificate and
-  key, exported once from Keychain Access.
-- The `.p12`'s password from the login keychain, service `app-store-dist-p12`
-  (`security add-generic-password -a "$USER" -s app-store-dist-p12 -w`). It
-  checks that the password opens the file before setting anything.
-- `APP_STORE_API_ISSUER`: the team's issuer ID.
-
-The release job checks the same thing before it archives: every
-`ExportOptions.plist` entry needs an installed profile with that name and
-bundle ID, or it stops in seconds and lists what the secret holds.
-
-**Profile names** follow one pattern: the app's display name for the app,
-then a space and the target for each extension: `BeachDaze`,
-`BeachDaze Widget`, `BeachDaze Top Shelf`. The checks above hold whatever the
-names are; the pattern is so a person can tell profiles apart in the portal.
-Three of today's names predate it (`BeancounterWidget`, `ShiftChain.widget`,
-and a spare `ShiftChain App` beside `ShiftChain`).
-
-Re-run it when a profile is regenerated (a new capability, a renewed
-certificate) or the certificate is replaced. A Kotlin Multiplatform app whose
-Gradle build pulls GitHub Packages also passes `GH_GCR`. That is an ordinary
-repository secret, and the release job hands it to the archive step only.
-
-The App Store Connect record for the bundle ID must exist before the first
-release; the job stops with a message naming the bundle ID if it does not.
+A tvOS job is the same with `platform: tvos`, its own scheme and
+`export-options: ExportOptions-tvOS.plist`. After merging a change here, move
+`v1`; a caller passing an input `v1` lacks fails with `startup_failure`.
 
 ## `ocr-review.yml` — AI code review
 

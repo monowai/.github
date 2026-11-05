@@ -10,7 +10,9 @@ name: TestFlight (reusable)
 # platform, after their own tests pass, on any push to main whose subject starts
 # `release(`, or on workflow_dispatch. The `release` job below reads the scope
 # and goes on only when it names this call's platform, because a caller's `if:`
-# expression cannot split a scope list. A dispatch always releases.
+# expression cannot split a scope list. A dispatch releases every platform,
+# unless the caller's workflow_dispatch has a `platforms` input (e.g. "tvos")
+# naming the ones to ship.
 #
 # Everything app-specific lives in the caller's repository, nothing in here.
 #
@@ -104,12 +106,18 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MESSAGE: ${{ github.event.head_commit.message }}
+          DISPATCH_PLATFORMS: ${{ github.event.inputs.platforms }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           case "$PLATFORM" in ios|tvos) ;; *) echo "platform must be ios or tvos, not '$PLATFORM'" >&2; exit 1 ;; esac
           go=false
           if [[ "$EVENT" == workflow_dispatch ]]; then
-            go=true
+            if [[ -z "${DISPATCH_PLATFORMS// /}" ]]; then
+              go=true
+            else
+              IFS=, read -ra scopes <<<"${DISPATCH_PLATFORMS// /}"
+              for scope in "${scopes[@]}"; do [[ "$scope" == "$PLATFORM" ]] && go=true; done
+            fi
           else
             subject="${MESSAGE%%$'\n'*}"
             if [[ "$subject" =~ ^release\(([a-z0-9,\ ]+)\)!?: ]]; then
@@ -184,9 +192,10 @@ jobs:
           mkdir -p "$KEYS_DIR"
           ( umask 077; printf '%s\n' "$ASC_KEY_P8" > "$KEYS_DIR/AuthKey_${ASC_KEY_ID}.p8" )
 
-      # The next build number is one past the highest App Store Connect holds,
-      # so the repository never carries a build number and a re-run after a
-      # failed upload reuses the number nobody took. The JWT is signed with
+      # The next build number is one past the highest App Store Connect holds
+      # for this platform (each platform counts its own builds), so the
+      # repository never carries a build number and a re-run after a failed
+      # upload reuses the number nobody took. The JWT is signed with
       # openssl so the runner needs no Python packages.
       - name: Next build number
         id: asc
@@ -194,11 +203,13 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           BUNDLE_ID: ${{ inputs.bundle-id }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           python3 - <<'EOF' | tee -a "$GITHUB_OUTPUT"
           import base64, json, os, subprocess, time, urllib.parse, urllib.request
 
           key_id, issuer, bundle = os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], os.environ["BUNDLE_ID"]
+          asc_platform = {"ios": "IOS", "tvos": "TV_OS"}[os.environ["PLATFORM"]]
           key_file = f"{os.environ['KEYS_DIR']}/AuthKey_{key_id}.p8"
 
           def b64(raw: bytes) -> bytes:
@@ -240,7 +251,13 @@ jobs:
           builds = get(
               "/v1/builds?"
               + urllib.parse.urlencode(
-                  {"filter[app]": app["id"], "sort": "-uploadedDate", "limit": 200, "fields[builds]": "version"}
+                  {
+                      "filter[app]": app["id"],
+                      "filter[preReleaseVersion.platform]": asc_platform,
+                      "sort": "-uploadedDate",
+                      "limit": 200,
+                      "fields[builds]": "version",
+                  }
               )
           )["data"]
           highest = max((int(b["attributes"]["version"]) for b in builds if b["attributes"]["version"].isdigit()), default=0)
@@ -329,6 +346,8 @@ jobs:
             -configuration Release \
             -destination "$DESTINATION" \
             -archivePath "$ARCHIVE" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CURRENT_PROJECT_VERSION="$BUILD" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
 

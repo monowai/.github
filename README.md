@@ -7,7 +7,7 @@ by several repos, which should not live inside any one of them.
 |---|---|
 | [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
 | [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
-| [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) | Reusable iOS release: archive, sign, upload to TestFlight, tag the commit. Called by each app repo; [`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh) sets a repo up. |
+| [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) | Reusable iOS/tvOS release: archive, sign, upload to TestFlight, tag the commit, publish a prerelease. Called by each app repo; [`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh) sets a repo up. |
 | [`mirror-images.yml`](.github/workflows/mirror-images.yml) | Copies third-party images into `ghcr.io/monowai` so builds never pull them anonymously. Runs here, by hand. |
 | [`storage-cleanup.yml`](.github/workflows/storage-cleanup.yml) | Weekly purge of workflow runs on deleted branches, undeployed image versions and unpinned jar versions. Policy in [`scripts/storage-cleanup.py`](scripts/storage-cleanup.py). Runs here, Mondays. |
 
@@ -106,20 +106,38 @@ Another repository that starts using the adapter needs **Read** added there
 too. On a laptop, run `docker login ghcr.io` with a token that has
 `read:packages` before a local build.
 
-## `ios-testflight.yml` — iOS release to TestFlight
+## `ios-testflight.yml` — iOS and tvOS releases to TestFlight
 
-Archives an iOS app on kauri's macOS runner (`kauri-mac`,
+Archives an iOS or tvOS app on kauri's macOS runner (`kauri-mac`,
 `network/GH_MAC_RUNNER.md`), signs it for the App Store, uploads it to
-TestFlight and tags the commit `ios/<version>+<build>`. One workflow for every
-app: bc-mobile first, then BeachDaze, ShiftChain and RunRuby's phone app.
-Google Play is a separate workflow with its own release cycle, still to come.
+TestFlight, tags the commit `<platform>/<version>+<build>` and publishes a
+GitHub Release. One workflow for every app: bc-mobile, RunRuby's phone app and
+ShiftChain, then BeachDaze (iOS and tvOS). Google Play is a separate workflow
+with its own release cycle, still to come (#14).
 
-**Release by commit type.** A caller runs it when a squash-merged commit on
-`main` starts with `release(testflight)`, so the PR title is the switch:
-`release(testflight): portfolio totals and widget header`. The release job
-`needs` the caller's test jobs, so a red build never ships. The scope names the
-channel; Google Play will follow as `release(play)`. Each caller also takes
-`workflow_dispatch` on `main`, to re-release without a new commit.
+**Release by commit type; the scope names the platforms.** The squash-merged
+PR title is the switch:
+
+| Subject | Ships |
+|---|---|
+| `release(ios): portfolio totals and widget header` | iOS |
+| `release(tvos): top shelf artwork` | tvOS |
+| `release(ios,tvos): shared playback fix` | both, as two uploads |
+| `release(android): …` | Google Play, once #14 lands |
+
+Each platform keeps its own cycle: an iOS release never ships tvOS. A caller
+calls the workflow once per platform it builds, on any push to `main` whose
+subject starts `release(`. The workflow's first job, `release`, reads the scope
+and continues only when it names that call's `platform`, because a caller's
+`if:` expression cannot split a scope list. The upload `needs` the caller's
+test jobs, so a red build never ships. `workflow_dispatch` on `main` always
+releases, to re-release without a new commit.
+
+**Each upload is tagged and released.** The tag is `ios/0.1.0+34` or
+`tvos/1.2.0+7`, so `git tag -l 'ios/*'` says which commit each TestFlight build
+is. The GitHub Release is a prerelease (TestFlight is not the App Store), never
+marked latest, named `<scheme> <platform> <version> (<build>)`, with GitHub's
+generated notes since the same platform's previous tag.
 
 **Build numbers come from App Store Connect**, one past the highest build it
 holds, and are passed to `xcodebuild` as `CURRENT_PROJECT_VERSION`. Nothing in
@@ -135,7 +153,8 @@ profiles, and removes both in an `if: always()` step. Nothing persists in the
 ### Calling it
 
 The caller passes each secret by name, not `secrets: inherit`: this repository
-is public and should see only what it uses.
+is public and should see only what it uses. One job per platform; a tvOS call
+adds `platform: tvos` and its own scheme and ExportOptions.
 
 ```yaml
   testflight:
@@ -143,14 +162,15 @@ is public and should see only what it uses.
     if: >-
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' ||
-       startsWith(github.event.head_commit.message, 'release(testflight)'))
+       startsWith(github.event.head_commit.message, 'release('))
     permissions:
-      contents: write   # pushes the tag
+      contents: write   # pushes the tag and creates the release
     uses: monowai/.github/.github/workflows/ios-testflight.yml@v1
     with:
       working-directory: iosApp        # holds project.yml or the .xcodeproj
       scheme: MyApp
       bundle-id: com.monowai.myapp
+      # platform: ios                        (or tvos)
       # export-options: ExportOptions.plist  (relative to working-directory)
       # xcodegen: true
       # java-version: "21"                   (Kotlin Multiplatform apps)

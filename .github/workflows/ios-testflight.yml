@@ -1,10 +1,18 @@
-name: iOS TestFlight (reusable)
+name: TestFlight (reusable)
 
-# Archives an iOS app, signs it for the App Store, uploads it to TestFlight and
-# tags the commit. Callers own the trigger (bc-mobile: a squash-merged
-# `release(testflight): ...` commit on main, after its own tests pass) and pass
-# the app's shape as inputs; everything app-specific lives in the caller's
-# repository, nothing in here.
+# Archives an iOS or tvOS app, signs it for the App Store, uploads it to
+# TestFlight, tags the commit <platform>/<version>+<build> and publishes a
+# prerelease GitHub Release with notes since that platform's previous one.
+#
+# A release is a commit type. The squash-merged subject names the platforms it
+# ships: `release(ios): ...`, `release(tvos): ...`, `release(ios,tvos): ...`
+# (Google Play will be `release(android)`). Callers call this workflow once per
+# platform, after their own tests pass, on any push to main whose subject starts
+# `release(`, or on workflow_dispatch. The `release` job below reads the scope
+# and goes on only when it names this call's platform, because a caller's `if:`
+# expression cannot split a scope list. A dispatch always releases.
+#
+# Everything app-specific lives in the caller's repository, nothing in here.
 #
 # Callers pin @v1. To roll a change out to every app, move the v1 tag.
 #
@@ -54,8 +62,8 @@ on:
         required: false
         type: string
         default: ""
-      tag-prefix:
-        description: "The commit is tagged <prefix>/<version>+<build>."
+      platform:
+        description: "ios or tvos. Picks the build destination and upload type, and names the release scope and tag prefix."
         required: false
         type: string
         default: ios
@@ -83,14 +91,48 @@ on:
         required: false
 
 jobs:
+  # Does this push release this platform? No secrets, no checkout.
+  release:
+    name: Release ${{ inputs.platform }}?
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.scope.outputs.go }}
+    steps:
+      - id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          case "$PLATFORM" in ios|tvos) ;; *) echo "platform must be ios or tvos, not '$PLATFORM'" >&2; exit 1 ;; esac
+          go=false
+          if [[ "$EVENT" == workflow_dispatch ]]; then
+            go=true
+          else
+            subject="${MESSAGE%%$'\n'*}"
+            if [[ "$subject" =~ ^release\(([a-z0-9,\ ]+)\)!?: ]]; then
+              IFS=, read -ra scopes <<<"${BASH_REMATCH[1]// /}"
+              for scope in "${scopes[@]}"; do [[ "$scope" == "$PLATFORM" ]] && go=true; done
+            fi
+            echo "Subject: $subject"
+          fi
+          echo "Release $PLATFORM: $go"
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
   testflight:
-    name: TestFlight
+    name: TestFlight ${{ inputs.platform }}
+    needs: release
+    if: needs.release.outputs.go == 'true'
     runs-on: ${{ inputs.runner }}
     environment: app-store
     timeout-minutes: 60
-    # Two releases queue; a half-finished upload is never cancelled.
+    # Releases of one platform queue; a half-finished upload is never
+    # cancelled. Per platform, so an iOS and a tvOS release never displace
+    # each other's pending run.
     concurrency:
-      group: testflight-${{ github.repository }}
+      group: testflight-${{ github.repository }}-${{ inputs.platform }}
       cancel-in-progress: false
     defaults:
       run:
@@ -100,12 +142,23 @@ jobs:
       # Everything this job writes lives under the runner's temp folder.
       - name: Work paths
         working-directory: .
+        env:
+          PLATFORM: ${{ inputs.platform }}
         run: |
           {
             echo "KEYCHAIN=$RUNNER_TEMP/app-signing.keychain-db"
             echo "KEYS_DIR=$RUNNER_TEMP/private_keys"
             echo "ARCHIVE=$RUNNER_TEMP/app.xcarchive"
             echo "EXPORT=$RUNNER_TEMP/export"
+            if [[ "$PLATFORM" == tvos ]]; then
+              echo "DESTINATION=generic/platform=tvOS"
+              echo "UPLOAD_TYPE=appletvos"
+              echo "PLATFORM_NAME=tvOS"
+            else
+              echo "DESTINATION=generic/platform=iOS"
+              echo "UPLOAD_TYPE=ios"
+              echo "PLATFORM_NAME=iOS"
+            fi
           } >> "$GITHUB_ENV"
 
       # The self-hosted runner keeps its workspace between jobs; a cancelled
@@ -274,7 +327,7 @@ jobs:
           xcodebuild archive \
             -scheme "$SCHEME" \
             -configuration Release \
-            -destination "generic/platform=iOS" \
+            -destination "$DESTINATION" \
             -archivePath "$ARCHIVE" \
             CURRENT_PROJECT_VERSION="$BUILD" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
@@ -297,24 +350,82 @@ jobs:
           ipa=$(find "$EXPORT" -maxdepth 1 -name '*.ipa' | head -1)
           [[ -n "$ipa" ]] || { echo "No .ipa in $EXPORT" >&2; exit 1; }
           API_PRIVATE_KEYS_DIR="$KEYS_DIR" xcrun altool --upload-app \
-            -f "$ipa" -t ios --apple-id "$APP_ID" \
+            -f "$ipa" -t "$UPLOAD_TYPE" --apple-id "$APP_ID" \
             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       # The tag answers "which commit is TestFlight build N?" without guesswork.
       - name: Tag the commit
+        id: tag
         env:
           BUILD: ${{ steps.asc.outputs.build }}
-          PREFIX: ${{ inputs.tag-prefix }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           version=$(/usr/libexec/PlistBuddy -c "Print :ApplicationProperties:CFBundleShortVersionString" "$ARCHIVE/Info.plist")
-          tag="$PREFIX/$version+$BUILD"
+          tag="$PLATFORM/$version+$BUILD"
           git tag "$tag" "$GITHUB_SHA"
           git push origin "refs/tags/$tag"
-          {
-            echo "### TestFlight build $version ($BUILD)"
-            echo
-            echo "Uploaded from \`${GITHUB_SHA:0:7}\`, tagged \`$tag\`. App Store Connect takes a few minutes to process it."
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A prerelease (TestFlight is not the App Store), never marked latest, with
+      # GitHub's generated notes since this platform's previous release tag.
+      - name: GitHub Release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_API: ${{ github.api_url }}
+          TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          BUILD: ${{ steps.asc.outputs.build }}
+          PLATFORM: ${{ inputs.platform }}
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          previous=$(git ls-remote --tags --refs origin "refs/tags/$PLATFORM/*" |
+            sed 's#.*refs/tags/##' | grep -vxF "$TAG" |
+            awk -F+ '$2 ~ /^[0-9]+$/ {print $2, $0}' | sort -n | tail -1 | cut -d' ' -f2-)
+          PREVIOUS="$previous" python3 - <<'EOF'
+          import json, os, urllib.request
+
+          api, repo, token = os.environ["GH_API"], os.environ["GH_REPO"], os.environ["TOKEN"]
+
+          def post(path, body):
+              request = urllib.request.Request(
+                  f"{api}/repos/{repo}/{path}",
+                  data=json.dumps(body).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          tag, previous = os.environ["TAG"], os.environ.get("PREVIOUS", "")
+          notes_request = {"tag_name": tag}
+          if previous:
+              notes_request["previous_tag_name"] = previous
+          notes = post("releases/generate-notes", notes_request)["body"]
+          release = post(
+              "releases",
+              {
+                  "tag_name": tag,
+                  "name": f"{os.environ['SCHEME']} {os.environ['PLATFORM_NAME']} {os.environ['VERSION']} ({os.environ['BUILD']})",
+                  "body": notes,
+                  "prerelease": True,
+                  "make_latest": "false",
+              },
+          )
+          print(release["html_url"])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(
+                  f"### TestFlight {os.environ['PLATFORM_NAME']} build {os.environ['VERSION']} ({os.environ['BUILD']})\n\n"
+                  f"Uploaded from `{os.environ['GITHUB_SHA'][:7]}`, tagged `{tag}`"
+                  + (f", notes since `{previous}`" if previous else "")
+                  + f". [Release]({release['html_url']}). App Store Connect takes a few minutes to process it.\n"
+              )
+          EOF
 
       - name: Remove signing material
         if: always()

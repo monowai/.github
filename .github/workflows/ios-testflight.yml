@@ -401,8 +401,10 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           SCHEME: ${{ inputs.scheme }}
         run: |
+          # A platform's first release has no earlier tag: grep then selects
+          # nothing and exits 1, which pipefail would turn into a failed step.
           previous=$(git ls-remote --tags --refs origin "refs/tags/$PLATFORM/*" |
-            sed 's#.*refs/tags/##' | grep -vxF "$TAG" |
+            sed 's#.*refs/tags/##' | { grep -vxF "$TAG" || true; } |
             awk -F+ '$2 ~ /^[0-9]+$/ {print $2, $0}' | sort -n | tail -1 | cut -d' ' -f2-)
           PREVIOUS="$previous" python3 - <<'EOF'
           import json, os, urllib.request

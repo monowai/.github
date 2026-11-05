@@ -3,13 +3,16 @@
 # environment (deployable from main only) and sets the six secrets the release
 # job reads. Run it from the laptop that holds the signing material.
 #
-# Usage: scripts/app-store-secrets.sh <owner/repo> <profile name>...
-#   e.g. scripts/app-store-secrets.sh monowai/ruby RunRuby
-#        scripts/app-store-secrets.sh monowai/bc-mobile Beancounter BeancounterWidget
+# Usage: scripts/app-store-secrets.sh <owner/repo>
+#   e.g. scripts/app-store-secrets.sh monowai/ruby
 #
-# The profile names are the App Store provisioning profiles the archive signs
-# with, app and extensions, as named in the developer portal. They are read
-# from Xcode's profile folders, so download them in Xcode first.
+# The profiles come from the repository itself: its committed
+# ExportOptions.plist (on the default branch) maps each bundle ID the archive
+# signs, app and extensions, to its App Store profile name. That file is what
+# the export signs with, so it is the one list; there is no second copy here to
+# drift. Each profile must be found in Xcode's profile folders with that exact
+# name AND that bundle ID, as an App Store profile that has not expired, or
+# nothing is set. Download the profiles in Xcode first.
 #
 # Shared material, the same for every app, lives in one private folder:
 #   $APP_STORE_CI_DIR (default ~/.appstoreconnect/ci)
@@ -20,12 +23,11 @@
 #     (add it with: security add-generic-password -a "$USER" -s app-store-dist-p12 -w)
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  sed -n '6,8p' "$0" >&2
+if [[ $# -ne 1 ]]; then
+  sed -n '6,7p' "$0" >&2
   exit 2
 fi
 repo="$1"
-shift
 
 ci_dir="${APP_STORE_CI_DIR:-$HOME/.appstoreconnect/ci}"
 : "${APP_STORE_API_ISSUER:?Set APP_STORE_API_ISSUER to the App Store Connect issuer ID}"
@@ -50,32 +52,62 @@ openssl pkcs12 -in "$p12" -passin "pass:$p12_password" -nokeys -noout 2>/dev/nul
   openssl pkcs12 -legacy -in "$p12" -passin "pass:$p12_password" -nokeys -noout 2>/dev/null ||
   { echo "The keychain password does not open $p12" >&2; exit 1; }
 
-# Each named profile: the App Store one (no device list) that expires last.
-profile_dirs=("$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" "$HOME/Library/MobileDevice/Provisioning Profiles")
-profiles=()
-for wanted in "$@"; do
-  best="" best_expiry=""
-  for dir in "${profile_dirs[@]}"; do
-    [[ -d "$dir" ]] || continue
-    for file in "$dir"/*.mobileprovision; do
-      [[ -f "$file" ]] || continue
-      plist="$(security cms -D -i "$file" 2>/dev/null)" || continue
-      [[ "$(plutil -extract Name raw - <<<"$plist" 2>/dev/null)" == "$wanted" ]] || continue
-      plutil -extract ProvisionedDevices raw - <<<"$plist" >/dev/null 2>&1 && continue
-      expiry="$(plutil -extract ExpirationDate raw - <<<"$plist")"
-      if [[ -z "$best" || "$expiry" > "$best_expiry" ]]; then
-        best="$file" best_expiry="$expiry"
-      fi
-    done
-  done
-  [[ -n "$best" ]] || { echo "No App Store profile named '$wanted'; download it in Xcode first" >&2; exit 1; }
-  if [[ "$best_expiry" < "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ]]; then
-    echo "Profile '$wanted' expired $best_expiry; regenerate it first" >&2
-    exit 1
-  fi
-  echo "Profile $wanted: $(basename "$best"), expires $best_expiry"
-  profiles+=("$best")
-done
+# The repository's one ExportOptions.plist (ExportOptions-tvOS.plist and the
+# like are other platforms' and not matched).
+export_path="$(gh api "repos/$repo/git/trees/HEAD?recursive=1" \
+  --jq '[.tree[].path | select(. == "ExportOptions.plist" or endswith("/ExportOptions.plist"))] | if length == 1 then .[0] else error("found \(length): \(join(", "))") end')" ||
+  { echo "$repo needs exactly one committed ExportOptions.plist" >&2; exit 1; }
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+gh api "repos/$repo/contents/$export_path" --jq .content | base64 --decode > "$work/ExportOptions.plist"
+echo "Profiles from $repo:$export_path"
+
+# One path per line, in ExportOptions order; exits non-zero with the reason.
+python3 - "$work/ExportOptions.plist" > "$work/profiles" <<'PY'
+import datetime, glob, os, plistlib, subprocess, sys
+
+export = plistlib.load(open(sys.argv[1], "rb"))
+team = export.get("teamID")
+wanted = export.get("provisioningProfiles") or {}
+if not team or not wanted:
+    sys.exit("ExportOptions.plist needs teamID and provisioningProfiles")
+
+folders = [
+    os.path.expanduser("~/Library/Developer/Xcode/UserData/Provisioning Profiles"),
+    os.path.expanduser("~/Library/MobileDevice/Provisioning Profiles"),
+]
+installed = []
+for path in sorted({p for folder in folders for p in glob.glob(os.path.join(folder, "*.mobileprovision"))}):
+    decoded = subprocess.run(["security", "cms", "-D", "-i", path], capture_output=True)
+    if decoded.returncode:
+        continue
+    profile = plistlib.loads(decoded.stdout)
+    installed.append((path, profile))
+
+now = datetime.datetime.now(datetime.timezone.utc)
+problems = []
+for bundle, name in wanted.items():
+    app_id = f"{team}.{bundle}"
+    same_bundle = [
+        (path, p) for path, p in installed
+        if p.get("Entitlements", {}).get("application-identifier") == app_id and "ProvisionedDevices" not in p
+    ]
+    matches = [(path, p) for path, p in same_bundle if p.get("Name") == name]
+    if not matches:
+        others = sorted({p.get("Name") for _, p in same_bundle})
+        hint = f"; App Store profiles for {bundle} here are named: {', '.join(others)}" if others else ""
+        problems.append(f"no App Store profile named '{name}' for {bundle}{hint}")
+        continue
+    path, profile = max(matches, key=lambda m: m[1]["ExpirationDate"])
+    expiry = profile["ExpirationDate"].replace(tzinfo=datetime.timezone.utc)
+    if expiry < now:
+        problems.append(f"'{name}' for {bundle} expired {expiry:%Y-%m-%d}; regenerate it")
+        continue
+    print(f"  {bundle}: '{name}', expires {expiry:%Y-%m-%d}", file=sys.stderr)
+    print(path)
+if problems:
+    sys.exit("\n".join(problems))
+PY
 
 echo "Environment app-store on $repo, main only"
 gh api -X PUT "repos/$repo/environments/app-store" --silent --input - <<'JSON'
@@ -91,6 +123,6 @@ printf '%s' "$APP_STORE_API_ISSUER" | set_secret ASC_ISSUER_ID
 set_secret ASC_KEY_P8 <"$key_file"
 base64 -i "$p12" | set_secret IOS_DIST_CERT_P12
 printf '%s' "$p12_password" | set_secret IOS_DIST_CERT_PASSWORD
-for file in "${profiles[@]}"; do base64 -i "$file"; done | set_secret IOS_PROVISIONING_PROFILES
+while IFS= read -r file; do base64 -i "$file"; done <"$work/profiles" | set_secret IOS_PROVISIONING_PROFILES
 
 gh secret list -R "$repo" --env app-store

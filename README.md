@@ -185,8 +185,7 @@ the tighter scope, since it reaches only jobs on `main`, never PR builds.
 setup in one command from the laptop that holds the signing material:
 
 ```bash
-scripts/app-store-secrets.sh monowai/<repo> <App Store profile name>...
-# e.g. scripts/app-store-secrets.sh monowai/bc-mobile Beancounter BeancounterWidget
+scripts/app-store-secrets.sh monowai/<repo>
 ```
 
 It creates the `app-store` environment (deployable from `main`, no
@@ -194,6 +193,14 @@ reviewers: the commit type is the gate) and sets `ASC_KEY_ID`,
 `ASC_ISSUER_ID`, `ASC_KEY_P8`, `IOS_DIST_CERT_P12`, `IOS_DIST_CERT_PASSWORD`
 and `IOS_PROVISIONING_PROFILES`. It reads:
 
+- **The profile list from the repository.** The committed
+  `ExportOptions.plist` on the default branch maps each bundle ID the archive
+  signs (app and extensions) to its App Store profile name. That file is what
+  the export signs with, so it is the only list; commit it before running the
+  script. Each profile must be in Xcode's profile folders with exactly that
+  name *and* that bundle ID, be an App Store profile, and not have expired,
+  or nothing is set. On a mismatch the script names the profiles it does
+  have for that bundle ID.
 - `~/.appstoreconnect/ci/AuthKey_<key id>.p8`: the CI team key, role
   Developer (the least that uploads builds). Exactly one key in that folder.
 - `~/.appstoreconnect/ci/dist.p12`: the Apple Distribution certificate and
@@ -202,8 +209,17 @@ and `IOS_PROVISIONING_PROFILES`. It reads:
   (`security add-generic-password -a "$USER" -s app-store-dist-p12 -w`). It
   checks that the password opens the file before setting anything.
 - `APP_STORE_API_ISSUER`: the team's issuer ID.
-- The named App Store profiles from Xcode's profile folders: the newest copy
-  of each, refusing one that has expired. Download them in Xcode first.
+
+The release job checks the same thing before it archives: every
+`ExportOptions.plist` entry needs an installed profile with that name and
+bundle ID, or it stops in seconds and lists what the secret holds.
+
+**Profile names** follow one pattern: the app's display name for the app,
+then a space and the target for each extension: `BeachDaze`,
+`BeachDaze Widget`, `BeachDaze Top Shelf`. The checks above hold whatever the
+names are; the pattern is so a person can tell profiles apart in the portal.
+Three of today's names predate it (`BeancounterWidget`, `ShiftChain.widget`,
+and a spare `ShiftChain App` beside `ShiftChain`).
 
 Re-run it when a profile is regenerated (a new capability, a renewed
 certificate) or the certificate is replaced. A Kotlin Multiplatform app whose

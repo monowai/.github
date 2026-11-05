@@ -7,7 +7,7 @@ by several repos, which should not live inside any one of them.
 |---|---|
 | [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
 | [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
-| [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) | Reusable iOS release: archive, sign, upload to TestFlight, tag the commit. Called by each app repo. |
+| [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) | Reusable iOS release: archive, sign, upload to TestFlight, tag the commit. Called by each app repo; [`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh) sets a repo up. |
 | [`mirror-images.yml`](.github/workflows/mirror-images.yml) | Copies third-party images into `ghcr.io/monowai` so builds never pull them anonymously. Runs here, by hand. |
 | [`storage-cleanup.yml`](.github/workflows/storage-cleanup.yml) | Weekly purge of workflow runs on deleted branches, undeployed image versions and unpinned jar versions. Policy in [`scripts/storage-cleanup.py`](scripts/storage-cleanup.py). Runs here, Mondays. |
 
@@ -161,6 +161,7 @@ is public and should see only what it uses.
       IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
       IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
       IOS_PROVISIONING_PROFILES: ${{ secrets.IOS_PROVISIONING_PROFILES }}
+      # GH_GCR: ${{ secrets.GH_GCR }}     (Gradle builds that pull GitHub Packages)
 ```
 
 Two traps in the caller:
@@ -177,33 +178,37 @@ profile for each bundle ID. Nothing in it is secret.
 
 ### One-time setup per app repository
 
-1. **Environment.** Settings → Environments → New, named `app-store`.
-   Deployment branches: `main` only. No reviewers: the commit type is the gate.
-2. **App Store Connect key.** Users and Access → Integrations → Team Keys,
-   one key per app repository so each can be revoked alone. Role: Developer if
-   it can upload builds, otherwise App Manager. Secrets `ASC_KEY_ID`,
-   `ASC_ISSUER_ID`, and `ASC_KEY_P8` (the whole `.p8` file).
-3. **Distribution certificate.** Keychain Access → My Certificates → *Apple
-   Distribution: …* → Export as `.p12` with a strong password. Secrets
-   `IOS_DIST_CERT_P12` (`base64 -i dist.p12`) and `IOS_DIST_CERT_PASSWORD`.
-   Delete the exported file afterwards.
-4. **Provisioning profiles.** Download the App Store profile for the app and
-   for each extension from the developer portal. Secret
-   `IOS_PROVISIONING_PROFILES`: each one `base64 -i <file>.mobileprovision`,
-   separated by a newline. When a profile is regenerated (a new capability, a
-   renewed certificate), update this secret.
+`monowai` is a personal account, so there are no organisation secrets: each
+app repository holds its own copy. An `app-store` environment secret is also
+the tighter scope, since it reaches only jobs on `main`, never PR builds.
+[`scripts/app-store-secrets.sh`](scripts/app-store-secrets.sh) does the whole
+setup in one command from the laptop that holds the signing material:
 
 ```bash
-# Example: set the secrets from files, straight into the environment.
-R=monowai/<repo>
-gh secret set ASC_KEY_ID      -R $R --env app-store --body <key id>
-gh secret set ASC_ISSUER_ID   -R $R --env app-store --body <issuer id>
-gh secret set ASC_KEY_P8      -R $R --env app-store < AuthKey_<key id>.p8
-base64 -i dist.p12 | gh secret set IOS_DIST_CERT_P12 -R $R --env app-store
-gh secret set IOS_DIST_CERT_PASSWORD -R $R --env app-store
-{ base64 -i App.mobileprovision; base64 -i Widget.mobileprovision; } |
-  gh secret set IOS_PROVISIONING_PROFILES -R $R --env app-store
+scripts/app-store-secrets.sh monowai/<repo> <App Store profile name>...
+# e.g. scripts/app-store-secrets.sh monowai/bc-mobile Beancounter BeancounterWidget
 ```
+
+It creates the `app-store` environment (deployable from `main`, no
+reviewers: the commit type is the gate) and sets `ASC_KEY_ID`,
+`ASC_ISSUER_ID`, `ASC_KEY_P8`, `IOS_DIST_CERT_P12`, `IOS_DIST_CERT_PASSWORD`
+and `IOS_PROVISIONING_PROFILES`. It reads:
+
+- `~/.appstoreconnect/ci/AuthKey_<key id>.p8`: the CI team key, role
+  Developer (the least that uploads builds). Exactly one key in that folder.
+- `~/.appstoreconnect/ci/dist.p12`: the Apple Distribution certificate and
+  key, exported once from Keychain Access.
+- The `.p12`'s password from the login keychain, service `app-store-dist-p12`
+  (`security add-generic-password -a "$USER" -s app-store-dist-p12 -w`). It
+  checks that the password opens the file before setting anything.
+- `APP_STORE_API_ISSUER`: the team's issuer ID.
+- The named App Store profiles from Xcode's profile folders: the newest copy
+  of each, refusing one that has expired. Download them in Xcode first.
+
+Re-run it when a profile is regenerated (a new capability, a renewed
+certificate) or the certificate is replaced. A Kotlin Multiplatform app whose
+Gradle build pulls GitHub Packages also passes `GH_GCR`. That is an ordinary
+repository secret, and the release job hands it to the archive step only.
 
 The App Store Connect record for the bundle ID must exist before the first
 release; the job stops with a message naming the bundle ID if it does not.

@@ -7,6 +7,7 @@ by several repos, which should not live inside any one of them.
 |---|---|
 | [`build-base-image.yml`](.github/workflows/build-base-image.yml) | Publishes `ghcr.io/monowai/eclipse-temurin`, the shared JRE base image. Runs here. |
 | [`ocr-review.yml`](.github/workflows/ocr-review.yml) | Reusable AI code review. Called by each repo. |
+| [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) | Reusable iOS release: archive, sign, upload to TestFlight, tag the commit. Called by each app repo. |
 | [`mirror-images.yml`](.github/workflows/mirror-images.yml) | Copies third-party images into `ghcr.io/monowai` so builds never pull them anonymously. Runs here, by hand. |
 | [`storage-cleanup.yml`](.github/workflows/storage-cleanup.yml) | Weekly purge of workflow runs on deleted branches, undeployed image versions and unpinned jar versions. Policy in [`scripts/storage-cleanup.py`](scripts/storage-cleanup.py). Runs here, Mondays. |
 
@@ -104,6 +105,108 @@ access**:
 Another repository that starts using the adapter needs **Read** added there
 too. On a laptop, run `docker login ghcr.io` with a token that has
 `read:packages` before a local build.
+
+## `ios-testflight.yml` — iOS release to TestFlight
+
+Archives an iOS app on kauri's macOS runner (`kauri-mac`,
+`network/GH_MAC_RUNNER.md`), signs it for the App Store, uploads it to
+TestFlight and tags the commit `ios/<version>+<build>`. One workflow for every
+app: bc-mobile first, then BeachDaze, ShiftChain and RunRuby's phone app.
+Google Play is a separate workflow with its own release cycle, still to come.
+
+**Release by commit type.** A caller runs it when a squash-merged commit on
+`main` starts with `release(testflight)`, so the PR title is the switch:
+`release(testflight): portfolio totals and widget header`. The release job
+`needs` the caller's test jobs, so a red build never ships. The scope names the
+channel; Google Play will follow as `release(play)`. Each caller also takes
+`workflow_dispatch` on `main`, to re-release without a new commit.
+
+**Build numbers come from App Store Connect**, one past the highest build it
+holds, and are passed to `xcodebuild` as `CURRENT_PROJECT_VERSION`. Nothing in
+the repository is bumped, and an app extension gets the same number when its
+Info.plist reads `$(CURRENT_PROJECT_VERSION)`. `MARKETING_VERSION` stays in the
+project and is changed on purpose.
+
+**Signing material lives for one job.** The runner is shared by every app
+repository's PR builds, so the job builds a temporary keychain, installs the
+profiles, and removes both in an `if: always()` step. Nothing persists in the
+`runner` account.
+
+### Calling it
+
+The caller passes each secret by name, not `secrets: inherit`: this repository
+is public and should see only what it uses.
+
+```yaml
+  testflight:
+    needs: [test]   # the caller's own test jobs
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'release(testflight)'))
+    permissions:
+      contents: write   # pushes the tag
+    uses: monowai/.github/.github/workflows/ios-testflight.yml@v1
+    with:
+      working-directory: iosApp        # holds project.yml or the .xcodeproj
+      scheme: MyApp
+      bundle-id: com.monowai.myapp
+      # export-options: ExportOptions.plist  (relative to working-directory)
+      # xcodegen: true
+      # java-version: "21"                   (Kotlin Multiplatform apps)
+    secrets:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+      IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+      IOS_PROVISIONING_PROFILES: ${{ secrets.IOS_PROVISIONING_PROFILES }}
+```
+
+Two traps in the caller:
+
+- A workflow-level `concurrency` with `cancel-in-progress: true` cancels a
+  release when the next commit lands on `main`. Make it
+  `${{ github.ref != 'refs/heads/main' }}`.
+- A `paths:` filter on the push trigger means the release commit must touch
+  those paths, or nothing runs. Use `workflow_dispatch` otherwise.
+
+Commit `ExportOptions.plist` beside the project. It names the team, the
+`app-store-connect` method, manual signing with `Apple Distribution`, and the
+profile for each bundle ID. Nothing in it is secret.
+
+### One-time setup per app repository
+
+1. **Environment.** Settings → Environments → New, named `app-store`.
+   Deployment branches: `main` only. No reviewers: the commit type is the gate.
+2. **App Store Connect key.** Users and Access → Integrations → Team Keys,
+   one key per app repository so each can be revoked alone. Role: Developer if
+   it can upload builds, otherwise App Manager. Secrets `ASC_KEY_ID`,
+   `ASC_ISSUER_ID`, and `ASC_KEY_P8` (the whole `.p8` file).
+3. **Distribution certificate.** Keychain Access → My Certificates → *Apple
+   Distribution: …* → Export as `.p12` with a strong password. Secrets
+   `IOS_DIST_CERT_P12` (`base64 -i dist.p12`) and `IOS_DIST_CERT_PASSWORD`.
+   Delete the exported file afterwards.
+4. **Provisioning profiles.** Download the App Store profile for the app and
+   for each extension from the developer portal. Secret
+   `IOS_PROVISIONING_PROFILES`: each one `base64 -i <file>.mobileprovision`,
+   separated by a newline. When a profile is regenerated (a new capability, a
+   renewed certificate), update this secret.
+
+```bash
+# Example: set the secrets from files, straight into the environment.
+R=monowai/<repo>
+gh secret set ASC_KEY_ID      -R $R --env app-store --body <key id>
+gh secret set ASC_ISSUER_ID   -R $R --env app-store --body <issuer id>
+gh secret set ASC_KEY_P8      -R $R --env app-store < AuthKey_<key id>.p8
+base64 -i dist.p12 | gh secret set IOS_DIST_CERT_P12 -R $R --env app-store
+gh secret set IOS_DIST_CERT_PASSWORD -R $R --env app-store
+{ base64 -i App.mobileprovision; base64 -i Widget.mobileprovision; } |
+  gh secret set IOS_PROVISIONING_PROFILES -R $R --env app-store
+```
+
+The App Store Connect record for the bundle ID must exist before the first
+release; the job stops with a message naming the bundle ID if it does not.
 
 ## `ocr-review.yml` — AI code review
 

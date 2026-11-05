@@ -6,13 +6,15 @@
 # Usage: scripts/app-store-secrets.sh <owner/repo>
 #   e.g. scripts/app-store-secrets.sh monowai/ruby
 #
-# The profiles come from the repository itself: its committed
-# ExportOptions.plist (on the default branch) maps each bundle ID the archive
-# signs, app and extensions, to its App Store profile name. That file is what
-# the export signs with, so it is the one list; there is no second copy here to
-# drift. Each profile must be found in Xcode's profile folders with that exact
-# name AND that bundle ID, as an App Store profile that has not expired, or
-# nothing is set. Download the profiles in Xcode first.
+# The profiles come from the repository itself: every committed
+# ExportOptions*.plist (on the default branch) whose method is
+# app-store-connect maps each bundle ID an archive signs, app and extensions, to
+# its App Store profile name: ExportOptions.plist for iOS, ExportOptions-tvOS.plist
+# for tvOS. Those files are what the exports sign with, so they are the one list;
+# there is no second copy here to drift. Each profile must be found in Xcode's
+# profile folders with that exact name AND that bundle ID, as an App Store
+# profile that has not expired, or nothing is set. Download the profiles in Xcode
+# first.
 #
 # Shared material, the same for every app, lives in one private folder:
 #   $APP_STORE_CI_DIR (default ~/.appstoreconnect/ci)
@@ -52,25 +54,41 @@ openssl pkcs12 -in "$p12" -passin "pass:$p12_password" -nokeys -noout 2>/dev/nul
   openssl pkcs12 -legacy -in "$p12" -passin "pass:$p12_password" -nokeys -noout 2>/dev/null ||
   { echo "The keychain password does not open $p12" >&2; exit 1; }
 
-# The repository's one ExportOptions.plist (ExportOptions-tvOS.plist and the
-# like are other platforms' and not matched).
-export_path="$(gh api "repos/$repo/git/trees/HEAD?recursive=1" \
-  --jq '[.tree[].path | select(. == "ExportOptions.plist" or endswith("/ExportOptions.plist"))] | if length == 1 then .[0] else error("found \(length): \(join(", "))") end')" ||
-  { echo "$repo needs exactly one committed ExportOptions.plist" >&2; exit 1; }
+# Every committed ExportOptions*.plist; the matcher keeps the App Store ones.
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-gh api "repos/$repo/contents/$export_path" --jq .content | base64 --decode > "$work/ExportOptions.plist"
-echo "Profiles from $repo:$export_path"
+gh api "repos/$repo/git/trees/HEAD?recursive=1" \
+  --jq '.tree[].path | select(test("(^|/)ExportOptions[^/]*\\.plist$"))' > "$work/paths"
+[[ -s "$work/paths" ]] || { echo "$repo has no committed ExportOptions*.plist" >&2; exit 1; }
+index=0
+while IFS= read -r path; do
+  index=$((index + 1))
+  gh api "repos/$repo/contents/$path" --jq .content | base64 --decode > "$work/export-$index.plist"
+  echo "$path" > "$work/export-$index.path"
+done < "$work/paths"
 
-# One path per line, in ExportOptions order; exits non-zero with the reason.
-python3 - "$work/ExportOptions.plist" > "$work/profiles" <<'PY'
+# One path per line; exits non-zero with the reason.
+python3 - "$work" > "$work/profiles" <<'PY'
 import datetime, glob, os, plistlib, subprocess, sys
 
-export = plistlib.load(open(sys.argv[1], "rb"))
-team = export.get("teamID")
-wanted = export.get("provisioningProfiles") or {}
-if not team or not wanted:
-    sys.exit("ExportOptions.plist needs teamID and provisioningProfiles")
+work = sys.argv[1]
+team, wanted = None, {}
+for plist in sorted(glob.glob(os.path.join(work, "export-*.plist"))):
+    source = open(plist[: -len(".plist")] + ".path").read().strip()
+    export = plistlib.load(open(plist, "rb"))
+    if export.get("method") != "app-store-connect":
+        print(f"Skipping {source}: method {export.get('method')}", file=sys.stderr)
+        continue
+    if not export.get("teamID") or not export.get("provisioningProfiles"):
+        sys.exit(f"{source} needs teamID and provisioningProfiles")
+    if team and export["teamID"] != team:
+        sys.exit(f"{source} names team {export['teamID']}, another file {team}")
+    team = export["teamID"]
+    print(f"Profiles from {source}", file=sys.stderr)
+    for bundle, name in export["provisioningProfiles"].items():
+        wanted[(bundle, name)] = source
+if not wanted:
+    sys.exit("No app-store-connect ExportOptions*.plist")
 
 folders = [
     os.path.expanduser("~/Library/Developer/Xcode/UserData/Provisioning Profiles"),
@@ -86,7 +104,7 @@ for path in sorted({p for folder in folders for p in glob.glob(os.path.join(fold
 
 now = datetime.datetime.now(datetime.timezone.utc)
 problems = []
-for bundle, name in wanted.items():
+for bundle, name in wanted:
     app_id = f"{team}.{bundle}"
     same_bundle = [
         (path, p) for path, p in installed

@@ -86,7 +86,7 @@ on:
         description: "The .p12's password."
         required: true
       IOS_PROVISIONING_PROFILES:
-        description: "Every App Store profile the archive signs with (app and extensions), each base64, separated by whitespace."
+        description: "Every App Store profile the archive signs with (app and extensions), as one gzipped tar, base64. Compressed because a secret holds at most 48 KB. scripts/app-store-secrets.sh writes it."
         required: true
       GH_GCR:
         description: "GitHub Packages token, for apps whose Gradle build pulls private packages. Reaches the archive step only."
@@ -291,18 +291,20 @@ jobs:
           dirs=("$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" "$HOME/Library/MobileDevice/Provisioning Profiles")
           mkdir -p "${dirs[@]}"
           : > "$RUNNER_TEMP/profiles.installed"
-          for encoded in $PROFILES; do
-            profile="$RUNNER_TEMP/profile.mobileprovision"
-            printf '%s' "$encoded" | base64 --decode > "$profile"
+          unpacked="$RUNNER_TEMP/profiles"
+          mkdir -p "$unpacked"
+          printf '%s' "$PROFILES" | base64 --decode | tar -xzf - -C "$unpacked"
+          for profile in "$unpacked"/*.mobileprovision; do
+            [[ -f "$profile" ]] || { echo "IOS_PROVISIONING_PROFILES holds no profiles; re-run scripts/app-store-secrets.sh" >&2; exit 1; }
             uuid=$(security cms -D -i "$profile" | plutil -extract UUID raw -)
             name=$(security cms -D -i "$profile" | plutil -extract Name raw -)
             for dir in "${dirs[@]}"; do
               cp "$profile" "$dir/$uuid.mobileprovision"
               echo "$dir/$uuid.mobileprovision" >> "$RUNNER_TEMP/profiles.installed"
             done
-            rm -f "$profile"
             echo "Installed profile $name ($uuid)"
           done
+          rm -rf "$unpacked"
 
       # Seconds here instead of a signing error deep in xcodebuild: every bundle
       # ID in ExportOptions.plist needs an installed App Store profile with
@@ -458,4 +460,4 @@ jobs:
           if [[ -f "$RUNNER_TEMP/profiles.installed" ]]; then
             while IFS= read -r installed; do rm -f "$installed"; done < "$RUNNER_TEMP/profiles.installed"
           fi
-          rm -rf "$KEYS_DIR" "$RUNNER_TEMP/dist.p12" "$ARCHIVE" "$EXPORT"
+          rm -rf "$KEYS_DIR" "$RUNNER_TEMP/dist.p12" "$RUNNER_TEMP/profiles" "$ARCHIVE" "$EXPORT"

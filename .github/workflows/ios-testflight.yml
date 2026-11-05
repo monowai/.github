@@ -78,6 +78,9 @@ on:
       IOS_PROVISIONING_PROFILES:
         description: "Every App Store profile the archive signs with (app and extensions), each base64, separated by whitespace."
         required: true
+      GH_GCR:
+        description: "GitHub Packages token, for apps whose Gradle build pulls private packages. Reaches the archive step only."
+        required: false
 
 jobs:
   testflight:
@@ -239,6 +242,7 @@ jobs:
         env:
           SCHEME: ${{ inputs.scheme }}
           BUILD: ${{ steps.asc.outputs.build }}
+          GH_GCR: ${{ secrets.GH_GCR }}
         run: |
           xcodebuild archive \
             -scheme "$SCHEME" \

@@ -34,6 +34,10 @@ on:
         type: string
         default: https://api.deepseek.com/chat/completions
       llm_model:
+        # deepseek-flash is DeepSeek's floating alias for its newest Flash
+        # model, currently DeepSeek V4.1 Flash; it moves with DeepSeek's
+        # releases, so no version is pinned here.
+        #
         # deepseek-flash, not deepseek-v4-pro: on the same diffs (five planted
         # defects, two real commits, 2026-10-13) flash found all five planted
         # defects with no false alarms, as v4-pro did, at a third of the cost
@@ -203,7 +207,7 @@ jobs:
         # on the review provider, not a defect in the PR, and a bare red X says
         # the opposite. Any other failure is re-raised there unchanged.
         continue-on-error: true
-        uses: alibaba/open-code-review@v1.11.0
+        uses: alibaba/open-code-review@v1.13.13
         with:
           llm_url: ${{ inputs.llm_url }}
           llm_model: ${{ inputs.llm_model }}

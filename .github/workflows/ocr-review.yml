@@ -213,6 +213,11 @@ jobs:
           llm_model: ${{ inputs.llm_model }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic }}
+          # Install the OCR runtime that matches the action tag above. The
+          # default, "latest", broke on 1.14.0 (2026-11-21): its installer
+          # takes OCR_VERSION=latest as a release tag and downloads
+          # releases/download/vlatest/..., which is a 404. Bump both together.
+          ocr_version: "1.13.13"
           # Update one summary comment in place instead of stacking a new one
           # on every run.
           sticky_summary: "true"
